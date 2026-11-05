@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATLAS Trading System</title>
+<style>
+  :root {
+    --bg: #07111f;
+    --bg-2: #0c1b30;
+    --line: rgba(92, 214, 255, 0.35);
+    --glow: rgba(64, 196, 255, 0.18);
+    --text: #e7f6ff;
+    --muted: #8eabc4;
+    --up: #3ee0a2;
+    --down: #ff5d73;
+    --amber: #ffc857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(circle at 50% 120%, rgba(32, 120, 180, 0.28), transparent 42%),
+      radial-gradient(circle at 80% 10%, rgba(40, 90, 160, 0.2), transparent 28%),
+      var(--bg);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 16px 22px 8px;
+  }
+  .mark { width: 54px; height: 54px; filter: drop-shadow(0 0 8px rgba(80, 200, 255, 0.65)); }
+  h1 {
+    margin: 0;
+    font-size: 28px;
+    letter-spacing: 0.18em;
+    font-weight: 700;
+  }
+  .sub { margin: 2px 0 0; color: var(--muted); letter-spacing: 0.22em; font-size: 11px; }
+  .badge {
+    margin-left: auto;
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    padding: 6px 12px;
+    letter-spacing: 0.16em;
+    font-weight: 700;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    gap: 14px;
+    padding: 12px 18px 22px;
+  }
+  .panel {
+    background: linear-gradient(180deg, rgba(12, 32, 56, 0.92), rgba(7, 16, 30, 0.92));
+    border: 1px solid var(--line);
+    box-shadow: inset 0 0 24px var(--glow);
+    padding: 12px 14px 16px;
+  }
+  h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: 0.14em; color: #9adfff; font-weight: 650; }
+  .symbol-btn, .tf-btn, button {
+    font: inherit;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--line);
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .symbol-btn.active, .tf-btn.active { border-color: #7ad7ff; color: #dff6ff; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  canvas { width: 100%; height: 320px; display: block; background: rgba(0, 0, 0, 0.25); }
+  .muted { color: var(--muted); }
+  .card { border-top: 1px solid rgba(122, 215, 255, 0.2); padding: 10px 0; }
+  .card strong { letter-spacing: 0.08em; }
+  .buy { border-color: var(--up); color: var(--up); }
+  .sell { border-color: var(--down); color: var(--down); }
+  .alert { border: 1px solid var(--amber); padding: 8px; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td, th { text-align: left; padding: 4px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); }
+  .modal {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62);
+    display: none; align-items: center; justify-content: center;
+  }
+  .modal.open { display: flex; }
+  .modal .panel { max-width: 420px; }
+  .error { color: var(--down); }
+  @media (max-width: 1100px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+    <path fill="#07111f" stroke="#7ad7ff" stroke-width="2" d="M32 6c8 8 14 10 22 8-4 10-2 16 2 24-8 2-14 8-16 16-2-6-8-12-16-14 2-8 0-16-4-22 8 0 12-4 12-12z"/>
+    <circle cx="26" cy="28" r="2" fill="#9adfff"/>
+    <circle cx="40" cy="28" r="2" fill="#9adfff"/>
+  </svg>
+  <div>
+    <h1>ATLAS</h1>
+    <p class="sub">TRADING SYSTEM · PAPER</p>
+  </div>
+  <div class="badge" id="mode-badge">PAPER</div>
+</header>
+<div class="layout">
+  <section class="panel">
+    <h2>WATCHLIST</h2>
+    <div id="watchlist" class="muted">Loading ledger…</div>
+    <h2 style="margin-top:16px">PORTFOLIO</h2>
+    <div id="portfolio" class="muted">—</div>
+    <h2 style="margin-top:16px">RECENT FILLS</h2>
+    <div id="fills" class="muted">—</div>
+  </section>
+  <section class="panel">
+    <div class="row" id="timeframes"></div>
+    <canvas id="chart" width="800" height="320"></canvas>
+    <p id="chart-note" class="muted"></p>
+    <h2>SELL RECOMMENDED</h2>
+    <div id="alerts" class="muted">No exit alerts.</div>
+  </section>
+  <section class="panel">
+    <h2>TOP 3 BUY CANDIDATES</h2>
+    <p id="candidate-note" class="muted"></p>
+    <div id="candidates"></div>
+  </section>
+</div>
+<div class="modal" id="modal">
+  <div class="panel">
+    <h2 id="modal-title">CONFIRM PAPER ORDER</h2>
+    <p id="modal-body"></p>
+    <div class="row">
+      <button id="modal-ok" class="buy" type="button">Submit paper order</button>
+      <button id="modal-cancel" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+<script>
+const TOKEN = "__ATLAS_LOCAL_TOKEN__";
+const state = { symbol: null, timeframe: null, pending: null };
+const chart = document.getElementById("chart");
+
+function money(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  return Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function confirmTrade(title, body) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("modal");
+    document.getElementById("modal-title").textContent = title;
+    document.getElementById("modal-body").textContent = body;
+    modal.classList.add("open");
+    const ok = document.getElementById("modal-ok");
+    const cancel = document.getElementById("modal-cancel");
+    function done(value) {
+      modal.classList.remove("open");
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      resolve(value);
+    }
+    function onOk() { done(true); }
+    function onCancel() { done(false); }
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+  });
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Atlas-Token": TOKEN },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json();
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || "Order rejected");
+  return payload;
+}
+
+function drawCandles(candles) {
+  const width = chart.clientWidth || 800;
+  const height = 320;
+  const ratio = window.devicePixelRatio || 1;
+  chart.width = width * ratio;
+  chart.height = height * ratio;
+  const ctx = chart.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "rgba(4, 12, 24, 0.65)";
+  ctx.fillRect(0, 0, width, height);
+  if (!candles.length) {
+    ctx.fillStyle = "#8eabc4";
+    ctx.fillText("No bars returned.", 16, 28);
+    return;
+  }
+  const highs = candles.map((bar) => bar.high);
+  const lows = candles.map((bar) => bar.low);
+  const max = Math.max(...highs);
+  const min = Math.min(...lows);
+  const span = max - min || 1;
+  const slot = width / candles.length;
+  candles.forEach((bar, index) => {
+    const x = index * slot + slot / 2;
+    const y = (value) => 12 + (max - value) / span * (height - 24);
+    const up = bar.close >= bar.open;
+    ctx.strokeStyle = up ? "#3ee0a2" : "#ff5d73";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.moveTo(x, y(bar.high));
+    ctx.lineTo(x, y(bar.low));
+    ctx.stroke();
+    const top = y(Math.max(bar.open, bar.close));
+    const bottom = y(Math.min(bar.open, bar.close));
+    ctx.fillRect(x - Math.max(1, slot * 0.3), top, Math.max(2, slot * 0.6), Math.max(1, bottom - top));
+  });
+}
+
+async function loadCandles() {
+  const note = document.getElementById("chart-note");
+  if (!state.symbol || !state.timeframe) return;
+  const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
+  const payload = await response.json();
+  drawCandles(payload.candles || []);
+  note.textContent = payload.error || `${payload.symbol} ${payload.timeframe} · ${ (payload.candles || []).length } bars from the market-data feed`;
+}
+
+function renderPortfolio(portfolio) {
+  document.getElementById("mode-badge").textContent = portfolio.mode || "PAPER";
+  const book = document.getElementById("portfolio");
+  const halt = portfolio.halted ? `<p class="error">${portfolio.halt_reason}</p>` : `<p class="muted">Daily-loss halt: clear</p>`;
+  const positions = (portfolio.positions || []).map((position) => `
+    <div class="card">
+      <strong>${position.symbol}</strong>
+      <div>Qty ${position.quantity} · avg ${money(position.average_price)} · last ${money(position.last_price)}</div>
+      <div class="muted">Stop ${money(position.stop_loss)} · target ${money(position.profit_target)}</div>
+      <button class="sell" type="button" data-sell="${position.symbol}">Sell</button>
+    </div>`).join("") || `<p class="muted">No open paper positions.</p>`;
+  book.innerHTML = `
+    <div>Cash ${money(portfolio.cash)}</div>
+    <div>Equity ${money(portfolio.equity)}</div>
+    <div>Today's P&L ${money(portfolio.daily_pnl)}</div>
+    <div class="muted">Hard stop auto-exit: ${portfolio.hard_stop ? "on" : "off"}</div>
+    ${halt}
+    ${positions}`;
+  book.querySelectorAll("[data-sell]").forEach((button) => {
+    button.addEventListener("click", () => askSell(button.dataset.sell));
+  });
+  const fills = document.getElementById("fills");
+  if (!portfolio.recent_fills || !portfolio.recent_fills.length) {
+    fills.innerHTML = `<p class="muted">No fills in the ledger.</p>`;
+    return;
+  }
+  fills.innerHTML = `<table><tbody>${portfolio.recent_fills.map((fill) =>
+    `<tr><td>${fill.timestamp}</td><td>${fill.symbol}</td><td>${fill.side}</td><td>${fill.quantity}</td><td>${money(fill.price)}</td></tr>`
+  ).join("")}</tbody></table>`;
+}
+
+function renderWatchlist(portfolio) {
+  const host = document.getElementById("watchlist");
+  const symbols = portfolio.instruments || [];
+  if (!state.symbol && symbols.length) state.symbol = symbols[0];
+  host.innerHTML = symbols.map((symbol) =>
+    `<button class="symbol-btn ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`
+  ).join(" ");
+  host.querySelectorAll("[data-symbol]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.symbol = button.dataset.symbol;
+      renderWatchlist(portfolio);
+      loadCandles();
+    });
+  });
+  const tfHost = document.getElementById("timeframes");
+  const frames = portfolio.timeframes || [];
+  if (!state.timeframe && frames.length) state.timeframe = frames[0];
+  tfHost.innerHTML = frames.map((frame) =>
+    `<button class="tf-btn ${frame === state.timeframe ? "active" : ""}" type="button" data-tf="${frame}">${frame}</button>`
+  ).join("");
+  tfHost.querySelectorAll("[data-tf]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.timeframe = button.dataset.tf;
+      renderWatchlist(portfolio);
+      loadCandles();
+    });
+  });
+}
+
+function renderCandidates(candidates, explanation) {
+  document.getElementById("candidate-note").textContent = explanation || "";
+  const host = document.getElementById("candidates");
+  if (!candidates.length) {
+    host.innerHTML = `<p class="muted">No BUY recommendations right now.</p>`;
+    return;
+  }
+  host.innerHTML = candidates.map((item) => `
+    <div class="card">
+      <strong>${item.symbol}</strong>
+      <div>Entry ${money(item.entry)} · stop ${money(item.stop)} · target ${money(item.target)}</div>
+      <div>Risk size ${item.quantity} · confidence ${item.confidence === null ? "—" : item.confidence}</div>
+      <div class="muted">${(item.reasons || []).join(" · ")}</div>
+      ${item.buyable ? `<button class="buy" type="button" data-buy="${item.symbol}">Buy</button>` : `<p class="error">Risk limits permit no shares.</p>`}
+    </div>`).join("");
+  host.querySelectorAll("[data-buy]").forEach((button) => {
+    button.addEventListener("click", () => askBuy(button.dataset.buy));
+  });
+}
+
+function renderAlerts(alerts) {
+  const host = document.getElementById("alerts");
+  if (!alerts.length) {
+    host.innerHTML = `<p class="muted">No exit alerts.</p>`;
+    return;
+  }
+  host.innerHTML = alerts.map((alert) => `
+    <div class="alert">
+      <strong>Sell recommended · ${alert.symbol}</strong>
+      <div>${alert.reason} · ${alert.message || ""}</div>
+      <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">OK sell</button>
+    </div>`).join("");
+  host.querySelectorAll("[data-alert]").forEach((button) => {
+    button.addEventListener("click", () => askAlert(button.dataset.alert, button.dataset.symbol));
+  });
+}
+
+async function askBuy(symbol) {
+  const ok = await confirmTrade("CONFIRM PAPER BUY", `Submit a paper buy for ${symbol}? The server will re-check the signal, risk limits, and the daily-loss halt. Live trading stays off.`);
+  if (!ok) return;
+  try { await post("/api/buy", { symbol }); await refresh(); }
+  catch (error) { document.getElementById("candidate-note").textContent = error.message; }
+}
+
+async function askSell(symbol) {
+  const ok = await confirmTrade("CONFIRM PAPER SELL", `Submit a paper sell for the open ${symbol} position at the latest fresh price? Live trading stays off.`);
+  if (!ok) return;
+  try { await post("/api/sell", { symbol }); await refresh(); }
+  catch (error) { document.getElementById("candidate-note").textContent = error.message; }
+}
+
+async function askAlert(alertId, symbol) {
+  const ok = await confirmTrade("CONFIRM RECOMMENDED SELL", `OK the recommended paper sell for ${symbol}? This click is the approval.`);
+  if (!ok) return;
+  try { await post("/api/alerts/accept", { alert_id: Number(alertId) }); await refresh(); }
+  catch (error) { document.getElementById("candidate-note").textContent = error.message; }
+}
+
+async function refresh() {
+  const response = await fetch("/api/state");
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "State request failed");
+  renderWatchlist(payload.portfolio);
+  renderPortfolio(payload.portfolio);
+  renderCandidates(payload.candidates || [], payload.candidate_explanation || "");
+  renderAlerts(payload.alerts || []);
+  await loadCandles();
+}
+
+refresh().catch((error) => {
+  document.getElementById("watchlist").textContent = error.message;
+});
+setInterval(() => { refresh().catch(() => {}); }, 20000);
+</script>
+</body>
+</html>

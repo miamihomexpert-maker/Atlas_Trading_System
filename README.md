@@ -62,6 +62,24 @@ Bars come from Yahoo Finance through `yfinance`. The `1h` request uses a `1mo` p
 
 The ledger is `database/atlas.sqlite3` unless `ATLAS_DATABASE_PATH` points somewhere else. A later session reloads the paper book, including each open position's stop and target.
 
+## Dashboard
+
+The dashboard is paper only, binds to `127.0.0.1`, and refuses live trading. Every figure on the page comes from the market-data feed, the SQLite ledger, or the paper pipeline. Order buttons do nothing until you confirm in the dialog. That click is the approval: the server re-checks risk limits and writes an audit row with a timestamp. A local token is embedded in the page and required on order requests. Telegram tokens are not sent to the browser.
+
+Start the loop in one terminal and the dashboard in another:
+
+```powershell
+.\scripts\paper.ps1
+```
+
+```powershell
+python main.py --dashboard
+```
+
+Open `http://127.0.0.1:8765`. The port is `ATLAS_DASHBOARD_PORT` (default 8765).
+
+`ATLAS_HARD_STOP=false` by default. While the loop is running, a stop, target, or opposing signal becomes a **Sell recommended** alert with an OK button. Set `ATLAS_HARD_STOP=true` only if a touch of the stored stop should sell immediately through the same risk and paper-broker path. Target and opposing signals still wait for the button.
+
 ## Continuous paper loop
 
 `python main.py --paper --loop` repeats the paper pass. The default pause is 300 seconds (`ATLAS_LOOP_INTERVAL_SECONDS`). Each open-market cycle fetches bars again. Orders still have to pass the existing stale-data check.
