@@ -329,9 +329,22 @@ def latest_model_probability(history, model):
         dtype=float,
     )
     probability = float(predict_probability(model, features))
+    threshold = float(model.get("threshold", 0.55))
+    if not np.isfinite(threshold):
+        raise ValueError("Model threshold must be finite.")
+    sell_below = 1 - threshold
+    if threshold > 0.5 and sell_below < threshold:
+        if probability >= threshold:
+            signal = "BUY"
+        elif probability <= sell_below:
+            signal = "SELL"
+        else:
+            signal = "WAIT"
+    else:
+        signal = "BUY" if probability >= threshold else "WAIT"
     return {
         "probability_up": probability,
-        "signal": "BUY" if probability >= model.get("threshold", 0.55) else "WAIT",
+        "signal": signal,
         "timestamp": str(data.index[-1]),
     }
 

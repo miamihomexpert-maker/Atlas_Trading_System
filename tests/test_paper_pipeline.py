@@ -5,6 +5,7 @@ import pytest
 
 from atlas.broker import PaperBroker
 from atlas.config import LIVE_TRADING
+from atlas.news import NewsEvent
 from atlas.pipeline import run_paper_pipeline
 from atlas.risk import calculate_position_size
 
@@ -134,3 +135,77 @@ def test_remote_approval_can_be_required_without_enabling_live_trading(monkeypat
             approved=True,
         )
     assert broker.positions() == {}
+
+
+def test_news_and_a_disagreeing_model_withhold_the_paper_order():
+    histories = {
+        "1h": recent_history(100, 1),
+        "1d": recent_history(100, 1),
+    }
+    broker = PaperBroker(initial_cash=10_000)
+    news = [
+        NewsEvent(
+            event_id="adverse-1",
+            title="Operator supplied opposing item",
+            category="EARNINGS",
+            published_at=datetime.now(timezone.utc),
+            sentiment=-1.0,
+            impact=1.0,
+            instruments=("XYZ",),
+        )
+    ]
+
+    vetoed = run_paper_pipeline(
+        "XYZ",
+        histories,
+        broker,
+        "news-veto",
+        approved=True,
+        news_events=news,
+    )
+
+    assert vetoed["technical_signal"] == "BUY"
+    assert vetoed["decision"] == "WAIT"
+    assert vetoed["news"]["status"] == "AVAILABLE"
+    assert vetoed["order"] is None
+    assert broker.positions() == {}
+
+    class BuyModel:
+        def active_model(self):
+            return {
+                "version": "buy-only",
+                "model": {
+                    "coefficients": [8, 0, 0, 0, 0, 0, 0, 0],
+                    "mean": [0] * 7,
+                    "scale": [1] * 7,
+                    "threshold": 0.55,
+                },
+            }
+
+    falling = {
+        "1h": recent_history(140, -1),
+        "1d": recent_history(140, -1),
+    }
+    broker.submit_order(
+        "XYZ",
+        "BUY",
+        10,
+        100,
+        "seed-long",
+        approved=True,
+        stop_loss=90,
+    )
+    blocked = run_paper_pipeline(
+        "XYZ",
+        falling,
+        broker,
+        "model-blocks-sell",
+        approved=True,
+        database=BuyModel(),
+    )
+
+    assert blocked["technical_signal"] == "SELL"
+    assert blocked["decision"] == "WAIT"
+    assert blocked["adaptive"]["prediction"]["signal"] == "BUY"
+    assert blocked["order"] is None
+    assert broker.positions()["XYZ"]["quantity"] == 10

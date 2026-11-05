@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 import os
 
+from atlas.adaptive import latest_model_probability
 from atlas.config import LIVE_TRADING
 from atlas.execution import execute_paper_signal
+from atlas.news import apply_news_context, assess_news_impact
 from atlas.strategy import evaluate_market
 
 from atlas.technical import calculate_sma, calculate_ema, calculate_rsi, calculate_macd
@@ -158,6 +160,79 @@ def _remote_approval_required(explicit):
     raise ValueError("ATLAS_REQUIRE_REMOTE_APPROVAL must be a boolean value.")
 
 
+def _decision_history(histories):
+    if "1d" in histories:
+        return histories["1d"]
+    return max(histories.values(), key=len)
+
+
+def _apply_model_and_news(scanned, histories, symbol, database, news_events):
+    """Confirm a technical decision with the active model and news, if present.
+
+    A missing model does not block the decision. An active model can confirm
+    BUY or SELL and otherwise withholds the recommendation. News can veto.
+    Neither source invents a direction the technical scan did not already take.
+    """
+    analysis = scanned["analysis"]
+    decision = {
+        "status": analysis.get("status"),
+        "signal": analysis.get("signal"),
+        "price": analysis.get("price"),
+        "reason": analysis.get("reason", ""),
+        "confidence": None,
+    }
+    recommendation = scanned["recommendation"]
+    if recommendation is not None:
+        decision["market_timestamp"] = recommendation.get("market_timestamp")
+
+    adaptive = {"status": "NO_ACTIVE_MODEL", "prediction": None}
+    active = database.active_model() if database is not None else None
+    if active is not None:
+        try:
+            prediction = latest_model_probability(
+                _decision_history(histories),
+                active["model"],
+            )
+        except ValueError as error:
+            adaptive = {
+                "status": "DATA_UNAVAILABLE",
+                "version": active["version"],
+                "prediction": None,
+                "reason": str(error),
+            }
+            decision["signal"] = "WAIT"
+            decision["reason"] = (
+                f"{decision['reason']} Active model could not score this history."
+            ).strip()
+            recommendation = None
+        else:
+            adaptive = {
+                "status": "ACTIVE",
+                "version": active["version"],
+                "prediction": prediction,
+            }
+            if decision["signal"] in {"BUY", "SELL"} and prediction["signal"] != decision["signal"]:
+                decision["signal"] = "WAIT"
+                decision["reason"] = (
+                    f"{decision['reason']} Model and strategy did not agree; "
+                    "no directional recommendation."
+                ).strip()
+                recommendation = None
+            elif decision["signal"] in {"BUY", "SELL"}:
+                decision["reason"] = (
+                    f"{decision['reason']} Confirmed by active model {active['version']}."
+                ).strip()
+
+    impact = assess_news_impact(list(news_events or []), symbol)
+    decision = apply_news_context(decision, impact)
+    if decision.get("signal") not in {"BUY", "SELL"}:
+        recommendation = None
+    elif recommendation is not None:
+        recommendation = dict(recommendation)
+        recommendation["explanation"] = decision.get("reason") or recommendation.get("explanation")
+    return decision, recommendation, adaptive, impact
+
+
 def run_paper_pipeline(
     symbol,
     histories,
@@ -171,11 +246,15 @@ def run_paper_pipeline(
     approval_chat_id=None,
     approval_database=None,
     require_remote_approval=None,
+    database=None,
+    news_events=None,
 ):
     """Scan, then send one recommendation through risk, approval, and the paper broker.
 
-    Telegram approval stays optional unless ``require_remote_approval`` is set
-    or ``ATLAS_REQUIRE_REMOTE_APPROVAL`` is true. Live trading is refused.
+    Technical timeframe agreement is confirmed by an active model when one
+    exists, and by caller-supplied news. Telegram approval stays optional
+    unless ``require_remote_approval`` is set or ``ATLAS_REQUIRE_REMOTE_APPROVAL``
+    is true. Live trading is refused.
     """
     if LIVE_TRADING:
         raise PermissionError("Live trading is disabled.")
@@ -189,11 +268,21 @@ def run_paper_pipeline(
         histories,
         minimum_agreement=minimum_agreement,
     )
-    recommendation = scanned["recommendation"]
+    decision, recommendation, adaptive, news_impact = _apply_model_and_news(
+        scanned,
+        histories,
+        symbol,
+        database,
+        news_events,
+    )
     result = {
         "symbol": scanned["symbol"],
         "analysis": scanned["analysis"],
+        "technical_signal": scanned["analysis"].get("signal"),
+        "decision": decision.get("signal"),
         "recommendation": recommendation,
+        "adaptive": adaptive,
+        "news": news_impact,
         "order": None,
         "execution": "NOT_SUBMITTED",
         "scanned_at": datetime.now(timezone.utc).isoformat(),
@@ -212,7 +301,7 @@ def run_paper_pipeline(
         max_data_age_seconds=max_data_age_seconds,
         approval_token=approval_token,
         approval_chat_id=approval_chat_id,
-        approval_database=approval_database,
+        approval_database=approval_database or database,
     )
     result["execution"] = result["order"]["status"]
     return result
