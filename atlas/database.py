@@ -151,6 +151,76 @@ class AtlasDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def replay_paper_orders(self):
+        """Return fills in insertion order so a restart can rebuild the book."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM paper_orders ORDER BY rowid"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def has_paper_state(self):
+        with self._lock:
+            snapshot = self._connection.execute(
+                "SELECT 1 FROM equity_snapshots LIMIT 1"
+            ).fetchone()
+            if snapshot:
+                return True
+            order = self._connection.execute(
+                "SELECT 1 FROM paper_orders LIMIT 1"
+            ).fetchone()
+        return order is not None
+
+    def first_equity_snapshot(self):
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT equity, realized_pnl
+                FROM equity_snapshots
+                ORDER BY id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_equity_snapshot(self):
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT equity, realized_pnl
+                FROM equity_snapshots
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row else None
+
+    def equity_before(self, timestamp):
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT equity FROM equity_snapshots
+                WHERE timestamp < ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(timestamp),),
+            ).fetchone()
+        return float(row["equity"]) if row else None
+
+    def earliest_equity_from(self, timestamp):
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT equity FROM equity_snapshots
+                WHERE timestamp >= ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (str(timestamp),),
+            ).fetchone()
+        return float(row["equity"]) if row else None
+
     def performance_report(self):
         orders = self.list_paper_orders()
         closed_fills = [

@@ -21,7 +21,13 @@ def execute_paper_signal(
     approval_chat_id=None,
     approval_database=None,
 ):
-    """Risk-check and submit an explicitly approved paper order."""
+    """Risk-check and submit an explicitly approved paper order.
+
+    Daily loss comes from ``broker.daily_pnl()`` (broker state and, when
+    attached, the database). ``daily_pnl`` is accepted for compatibility and
+    is not used, so a caller cannot pass 0 and skip the halt.
+    """
+    del daily_pnl
     limits = limits or RiskLimits()
     remote_approval = approval_token is not None
     if not approved and not remote_approval:
@@ -84,7 +90,7 @@ def execute_paper_signal(
 
     account = broker.account_info()
     equity = account["equity"]
-    if not validate_daily_loss(equity, daily_pnl, limits):
+    if not validate_daily_loss(equity, broker.daily_pnl(), limits):
         raise PermissionError("Daily loss limit reached; trading is halted.")
 
     positions = broker.positions()
@@ -135,6 +141,8 @@ def execute_paper_signal(
         price=float(entry),
         client_order_id=client_order_id,
         approved=True,
+        stop_loss=float(stop),
+        limits=limits,
     )
     if remote_approval:
         approval_database.complete_trade_approval(
