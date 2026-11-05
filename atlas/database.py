@@ -53,6 +53,13 @@ class AtlasDatabase:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS position_plans (
+                    symbol TEXT PRIMARY KEY,
+                    stop_loss REAL NOT NULL,
+                    profit_target REAL NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS trade_approvals (
                     token TEXT PRIMARY KEY,
                     chat_id TEXT NOT NULL,
@@ -112,7 +119,14 @@ class AtlasDatabase:
                 ),
             )
 
-    def record_paper_fill(self, order, realized_pnl, account):
+    def record_paper_fill(
+        self,
+        order,
+        realized_pnl,
+        account,
+        position_plan=None,
+        clear_position_symbol=None,
+    ):
         with self._lock, self._connection:
             self._connection.execute(
                 """
@@ -143,6 +157,38 @@ class AtlasDatabase:
                     float(account["realized_pnl"]),
                 ),
             )
+            if clear_position_symbol:
+                self._connection.execute(
+                    "DELETE FROM position_plans WHERE symbol = ?",
+                    (str(clear_position_symbol).strip().upper(),),
+                )
+            if position_plan is not None:
+                self._connection.execute(
+                    """
+                    INSERT INTO position_plans(
+                        symbol, stop_loss, profit_target, quantity, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                        stop_loss = excluded.stop_loss,
+                        profit_target = excluded.profit_target,
+                        quantity = excluded.quantity,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        str(position_plan["symbol"]).strip().upper(),
+                        float(position_plan["stop_loss"]),
+                        float(position_plan["profit_target"]),
+                        int(position_plan["quantity"]),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+
+    def list_position_plans(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM position_plans ORDER BY symbol"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_paper_orders(self):
         with self._lock:

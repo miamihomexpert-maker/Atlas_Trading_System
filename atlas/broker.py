@@ -55,6 +55,18 @@ class PaperBroker:
             self._orders[filled["order_id"]] = filled
             self._history.append(filled)
         self._reconcile_marks_to_latest_equity()
+        self._restore_position_plans()
+
+    def _restore_position_plans(self):
+        list_plans = getattr(self._database, "list_position_plans", None)
+        if not callable(list_plans):
+            return
+        for plan in list_plans():
+            symbol = str(plan["symbol"]).strip().upper()
+            if symbol not in self._positions:
+                continue
+            self._positions[symbol]["stop_loss"] = float(plan["stop_loss"])
+            self._positions[symbol]["profit_target"] = float(plan["profit_target"])
 
     def _reconcile_marks_to_latest_equity(self):
         latest = self._database.latest_equity_snapshot()
@@ -228,6 +240,41 @@ class PaperBroker:
                 current["last_price"] = order["price"]
         return realized_delta
 
+    def _position_plan_after_fill(self, order, stop_loss, profit_target):
+        """Remember the latest buy's stop and target. A flat sell clears them."""
+        symbol = order["symbol"]
+        if order["side"] == "BUY":
+            if (
+                isinstance(stop_loss, bool)
+                or isinstance(profit_target, bool)
+                or not isinstance(stop_loss, (int, float))
+                or not isinstance(profit_target, (int, float))
+                or not isfinite(stop_loss)
+                or not isfinite(profit_target)
+                or not stop_loss < order["price"] < profit_target
+            ):
+                return None, None
+            position = self._positions[symbol]
+            position["stop_loss"] = float(stop_loss)
+            position["profit_target"] = float(profit_target)
+            return {
+                "symbol": symbol,
+                "stop_loss": position["stop_loss"],
+                "profit_target": position["profit_target"],
+                "quantity": position["quantity"],
+            }, None
+        if symbol not in self._positions:
+            return None, symbol
+        position = self._positions[symbol]
+        if "stop_loss" not in position or "profit_target" not in position:
+            return None, None
+        return {
+            "symbol": symbol,
+            "stop_loss": position["stop_loss"],
+            "profit_target": position["profit_target"],
+            "quantity": position["quantity"],
+        }, None
+
     def submit_order(
         self,
         symbol,
@@ -237,6 +284,7 @@ class PaperBroker:
         client_order_id,
         approved=False,
         stop_loss=None,
+        profit_target=None,
         limits=None,
     ):
         """Fill a paper order. Approval does not waive risk limits."""
@@ -289,6 +337,11 @@ class PaperBroker:
             self._realized_pnl,
         )
         realized_delta = self._apply_position_change(order)
+        position_plan, clear_symbol = self._position_plan_after_fill(
+            order,
+            stop_loss,
+            profit_target,
+        )
         filled = {
             **order,
             "status": "FILLED",
@@ -296,11 +349,17 @@ class PaperBroker:
             "realized_pnl": realized_delta,
         }
         if self._database is not None:
+            plan_kwargs = {}
+            if position_plan is not None:
+                plan_kwargs["position_plan"] = position_plan
+            if clear_symbol is not None:
+                plan_kwargs["clear_position_symbol"] = clear_symbol
             try:
                 self._database.record_paper_fill(
                     filled,
                     realized_delta,
                     self.account_info(),
+                    **plan_kwargs,
                 )
             except Exception:
                 self._cash, self._positions, self._realized_pnl = previous_state

@@ -15,13 +15,14 @@ from atlas.telegram import get_telegram_status
 from atlas.database import get_database_status
 from atlas.news import get_news_status
 from atlas.adaptive import get_adaptive_status
-from atlas.session import run_paper_session
+from atlas.envfile import load_dotenv
+from atlas.session import run_book_status, run_paper_loop, run_paper_session
 from config.settings import load_settings
 
 
 logger = get_logger()
 _USAGE = (
-    "Usage: python main.py [--paper|--status]\n"
+    "Usage: python main.py [--paper] [--loop] | --status | --status-book\n"
     "Paper session environment variables are listed in README.md."
 )
 
@@ -50,12 +51,24 @@ def log_status():
 
 
 def main(argv=None):
+    load_dotenv()
     args = list(sys.argv[1:] if argv is None else argv)
     if args in ([], ["--paper"]):
-        summary = run_paper_session()
-        return summary
+        return run_paper_session()
+    if args in (["--paper", "--loop"], ["--loop", "--paper"], ["--loop"]):
+        try:
+            return run_paper_loop()
+        except KeyboardInterrupt:
+            logger.info("Paper loop stopped")
+            return {
+                "mode": "paper-loop",
+                "stopped": "interrupt",
+                "live_trading": False,
+            }
     if args == ["--status"]:
         return log_status()
+    if args == ["--status-book"]:
+        return run_book_status()
     raise SystemExit(_USAGE)
 
 

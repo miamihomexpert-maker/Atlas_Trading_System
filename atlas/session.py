@@ -1,15 +1,18 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import time
 import uuid
 
 from atlas.broker import PaperBroker
 from atlas.config import LIVE_TRADING
 from atlas.database import AtlasDatabase
+from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
+from atlas.market_hours import regular_session_status
 from atlas.news import NewsEvent
-from atlas.pipeline import run_paper_pipeline
+from atlas.pipeline import _remote_approval_required, run_paper_pipeline
 from config.settings import load_settings
 
 
@@ -147,21 +150,20 @@ def run_paper_session(
         if broker.account_info().get("trading_mode") != "PAPER":
             raise PermissionError("Live trading is disabled.")
 
-        for symbol in settings.instruments:
-            results.append(
-                _run_symbol(
-                    symbol,
-                    broker,
-                    database,
-                    timeframes,
-                    minimum_agreement,
-                    histories_by_symbol,
-                    news_events,
-                    approved,
-                    require_remote_approval,
-                    settings.max_market_data_age_seconds,
-                )
+        results.extend(
+            _collect_cycle_results(
+                settings,
+                broker,
+                database,
+                timeframes,
+                minimum_agreement,
+                histories_by_symbol,
+                news_events,
+                approved,
+                require_remote_approval,
             )
+        )
+        _notify_cycle(results)
     finally:
         if created_database and database is not None:
             database.close()
@@ -256,3 +258,399 @@ def _run_symbol(
         result.get("execution"),
     )
     return result
+
+
+def resolve_loop_interval(interval_seconds=None):
+    if interval_seconds is None:
+        interval_seconds = int(os.getenv("ATLAS_LOOP_INTERVAL_SECONDS", "300"))
+    if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int):
+        raise ValueError("ATLAS_LOOP_INTERVAL_SECONDS must be a positive integer.")
+    if interval_seconds <= 0:
+        raise ValueError("ATLAS_LOOP_INTERVAL_SECONDS must be a positive integer.")
+    return interval_seconds
+
+
+def run_paper_loop(
+    interval_seconds=None,
+    max_cycles=None,
+    now=None,
+    sleep=None,
+    **session_kwargs
+):
+    """Repeat a paper session on US regular-session hours.
+
+    Outside 09:30-16:00 America/New_York on weekdays the loop sleeps and does
+    not fetch or submit. KeyboardInterrupt stops the loop. Live trading is refused.
+    ``sleep`` and ``now`` are injection points for tests.
+    """
+    if LIVE_TRADING:
+        raise PermissionError("Live trading is disabled.")
+    interval_seconds = resolve_loop_interval(interval_seconds)
+    if max_cycles is not None and (
+        isinstance(max_cycles, bool)
+        or not isinstance(max_cycles, int)
+        or max_cycles <= 0
+    ):
+        raise ValueError("max_cycles must be a positive integer when provided.")
+    clock = now or (lambda: datetime.now(timezone.utc))
+    pause = sleep or time.sleep
+    cycles = []
+    stopped = None
+    try:
+        while True:
+            current = clock()
+            is_open, reason = regular_session_status(current)
+            if not is_open:
+                logger.info(
+                    "US regular session is %s; sleeping %s seconds",
+                    reason,
+                    interval_seconds,
+                )
+                cycles.append({"market": reason, "ran": False})
+            else:
+                summary = run_paper_session(**session_kwargs)
+                cycles.append({
+                    "market": reason,
+                    "ran": True,
+                    "fill_count": summary["fill_count"],
+                    "summary": summary,
+                })
+            if max_cycles is not None and len(cycles) >= max_cycles:
+                break
+            pause(interval_seconds)
+    except KeyboardInterrupt:
+        logger.info("Paper loop stopped")
+        stopped = "interrupt"
+    return {
+        "mode": "paper-loop",
+        "trading_mode": "PAPER",
+        "live_trading": False,
+        "interval_seconds": interval_seconds,
+        "cycles": cycles,
+        "stopped": stopped,
+    }
+
+
+def run_book_status(database=None, now=None):
+    """Print the paper book from the ledger. Does not submit orders."""
+    if LIVE_TRADING:
+        raise PermissionError("Live trading is disabled.")
+    settings = load_settings()
+    if settings.live_trading_enabled:
+        raise PermissionError("Live trading is disabled.")
+    created_database = database is None
+    path = os.getenv("ATLAS_DATABASE_PATH", "database/atlas.sqlite3")
+    if database is None and path != ":memory:" and not os.path.exists(path):
+        text = "No paper ledger yet. Live trading is disabled."
+        print(text)
+        return {
+            "mode": "status-book",
+            "live_trading": False,
+            "ledger": False,
+            "text": text,
+        }
+    if database is None:
+        database = AtlasDatabase(path)
+    try:
+        broker = PaperBroker(
+            initial_cash=settings.paper_initial_cash,
+            database=database,
+        )
+        report = _book_report(broker, database, now=now)
+    finally:
+        if created_database:
+            database.close()
+    print(report["text"])
+    logger.info("Paper book status printed; live trading disabled")
+    return report
+
+
+def _book_report(broker, database, now=None):
+    account = broker.account_info()
+    daily = broker.daily_pnl(now)
+    lines = [
+        "ATLAS paper book",
+        "trading_mode: PAPER",
+        "live_trading: false",
+        f"cash: {account['cash']:.2f}",
+        f"equity: {account['equity']:.2f}",
+        f"daily_pnl: {daily:.2f}",
+        "positions:",
+    ]
+    positions = broker.positions()
+    if not positions:
+        lines.append("  (none)")
+    for symbol, position in sorted(positions.items()):
+        stop = position.get("stop_loss")
+        target = position.get("profit_target")
+        lines.append(
+            "  {symbol} qty={qty} avg={avg:.2f} last={last:.2f} "
+            "stop={stop} target={target}".format(
+                symbol=symbol,
+                qty=position["quantity"],
+                avg=position["average_price"],
+                last=position["last_price"],
+                stop=_price_text(stop),
+                target=_price_text(target),
+            )
+        )
+    lines.append("recent fills:")
+    fills = database.list_paper_orders()[-10:]
+    if not fills:
+        lines.append("  (none)")
+    for fill in fills:
+        lines.append(
+            f"  {fill['timestamp']} {fill['symbol']} {fill['side']} "
+            f"{fill['quantity']} @ {float(fill['price']):.2f}"
+        )
+    text = "\n".join(lines)
+    return {
+        "mode": "status-book",
+        "live_trading": False,
+        "ledger": True,
+        "trading_mode": "PAPER",
+        "cash": account["cash"],
+        "equity": account["equity"],
+        "daily_pnl": daily,
+        "positions": positions,
+        "recent_fills": fills,
+        "text": text,
+    }
+
+
+def _price_text(value):
+    if isinstance(value, (int, float)):
+        return f"{float(value):.2f}"
+    return "n/a"
+
+
+def _collect_cycle_results(
+    settings,
+    broker,
+    database,
+    timeframes,
+    minimum_agreement,
+    histories_by_symbol,
+    news_events,
+    approved,
+    require_remote_approval,
+):
+    symbols = list(settings.instruments)
+    for symbol in broker.positions():
+        if symbol not in symbols:
+            symbols.append(symbol)
+    results = []
+    for symbol in symbols:
+        histories = _histories_for(symbol, timeframes, histories_by_symbol)
+        exit_result = _protective_exit(
+            symbol,
+            histories,
+            broker,
+            approved,
+            require_remote_approval,
+            settings.max_market_data_age_seconds,
+            database,
+        )
+        if exit_result is not None:
+            results.append(exit_result)
+            if exit_result.get("execution") == "FILLED":
+                continue
+        if symbol not in settings.instruments:
+            continue
+        if not histories:
+            logger.info("%s has no market bars; no order submitted", symbol)
+            results.append({
+                "symbol": str(symbol).strip().upper(),
+                "status": "NO_DATA",
+                "order": None,
+                "execution": "NOT_SUBMITTED",
+            })
+            continue
+        results.append(
+            _run_symbol(
+                symbol,
+                broker,
+                database,
+                timeframes,
+                minimum_agreement,
+                {str(symbol).strip().upper(): histories},
+                news_events,
+                approved,
+                require_remote_approval,
+                settings.max_market_data_age_seconds,
+            )
+        )
+    return results
+
+
+def _histories_for(symbol, timeframes, histories_by_symbol):
+    normalized = str(symbol).strip().upper()
+    if histories_by_symbol is not None:
+        return histories_by_symbol.get(symbol) or histories_by_symbol.get(normalized)
+    return fetch_session_histories(normalized, timeframes)
+
+
+def _protective_exit(
+    symbol,
+    histories,
+    broker,
+    approved,
+    require_remote_approval,
+    max_market_data_age_seconds,
+    database,
+):
+    normalized = str(symbol).strip().upper()
+    position = broker.positions().get(normalized)
+    if not position:
+        return None
+    has_plan = "stop_loss" in position and "profit_target" in position
+    quote = _latest_quote(histories)
+    if quote is None:
+        if not has_plan:
+            return None
+        return {
+            "symbol": normalized,
+            "order": None,
+            "execution": "NOT_SUBMITTED",
+            "exit_reason": "no_price",
+        }
+    market_timestamp, price = quote
+    if _quote_is_stale(market_timestamp, max_market_data_age_seconds):
+        if not has_plan:
+            return None
+        return {
+            "symbol": normalized,
+            "order": None,
+            "execution": "NOT_SUBMITTED",
+            "exit_reason": "stale_price",
+        }
+    broker.update_market_price(normalized, price)
+    if not has_plan:
+        return None
+    if price <= position["stop_loss"]:
+        reason = "stop"
+    elif price >= position["profit_target"]:
+        reason = "target"
+    else:
+        return None
+    signal = _exit_signal(normalized, price, market_timestamp)
+    try:
+        if _remote_approval_required(require_remote_approval):
+            raise PermissionError("Remote approval token is required.")
+        order = execute_paper_signal(
+            signal,
+            broker,
+            f"exit-{normalized}-{reason}-{uuid.uuid4().hex[:12]}",
+            approved=approved,
+            max_data_age_seconds=max_market_data_age_seconds,
+            approval_database=database,
+        )
+    except PermissionError as error:
+        if "Live trading" in str(error):
+            raise
+        logger.info("%s %s exit not submitted: %s", normalized, reason, error)
+        return {
+            "symbol": normalized,
+            "order": None,
+            "execution": "NOT_SUBMITTED",
+            "exit_reason": reason,
+            "error": str(error),
+        }
+    logger.info("%s protective %s exit %s", normalized, reason, order["status"])
+    return {
+        "symbol": normalized,
+        "decision": "SELL",
+        "order": order,
+        "execution": order["status"],
+        "exit_reason": reason,
+    }
+
+
+def _latest_quote(histories):
+    if not histories:
+        return None
+    chosen = None
+    for frame in histories.values():
+        if frame is None or getattr(frame, "empty", True):
+            continue
+        stamp = _as_utc(frame.index[-1])
+        try:
+            price = float(frame["Close"].iloc[-1])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if stamp is None or price <= 0:
+            continue
+        if chosen is None or stamp > chosen[0]:
+            chosen = (stamp, price)
+    if chosen is None:
+        return None
+    stamp, price = chosen
+    return stamp.isoformat(), price
+
+
+def _as_utc(stamp):
+    if hasattr(stamp, "to_pydatetime"):
+        stamp = stamp.to_pydatetime()
+    if not isinstance(stamp, datetime):
+        return None
+    if stamp.tzinfo is None:
+        return stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def _quote_is_stale(market_timestamp, max_age_seconds):
+    if (
+        isinstance(max_age_seconds, bool)
+        or not isinstance(max_age_seconds, (int, float))
+        or max_age_seconds <= 0
+    ):
+        return True
+    source = datetime.fromisoformat(str(market_timestamp).replace("Z", "+00:00"))
+    if source.tzinfo is None:
+        source = source.replace(tzinfo=timezone.utc)
+    age = (
+        datetime.now(timezone.utc) - source.astimezone(timezone.utc)
+    ).total_seconds()
+    return age < -60 or age > max_age_seconds
+
+
+def _exit_signal(symbol, price, market_timestamp):
+    return {
+        "instrument": symbol,
+        "direction": "SELL",
+        "entry_price": float(price),
+        "stop_loss": float(price) * 1.01,
+        "profit_target": float(price) * 0.99,
+        "market_timestamp": market_timestamp,
+        "explanation": "Protective paper exit at the latest observed price.",
+    }
+
+
+def _notify_cycle(results):
+    halt_noted = False
+    for item in results:
+        order = item.get("order")
+        if order and order.get("status") == "FILLED":
+            verb = "opened" if order.get("side") == "BUY" else "closed"
+            _notify(
+                f"Atlas paper {verb} {order.get('symbol')} {order.get('side')} "
+                f"{order.get('quantity')} @ {order.get('price')}"
+            )
+        if not halt_noted and "Daily loss" in str(item.get("error", "")):
+            halt_noted = True
+            _notify("Atlas paper trading halted: daily loss limit reached.")
+
+
+def _notify(text):
+    token = os.getenv("ATLAS_TELEGRAM_BOT_TOKEN")
+    chat = os.getenv("ATLAS_TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        return {"status": "SKIPPED"}
+    try:
+        from atlas.telegram import send_telegram_message
+
+        send_telegram_message(text)
+        return {"status": "SENT"}
+    except Exception as error:
+        logger.info("Telegram notification failed: %s", error)
+        return {"status": "FAILED"}
