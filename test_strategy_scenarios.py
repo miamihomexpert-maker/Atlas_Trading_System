@@ -1,0 +1,419 @@
+import numpy as np
+import pandas as pd
+
+from atlas.strategy import evaluate_market
+from atlas.pipeline import run_pipeline
+
+# ============================================================
+# ATLAS STRATEGY SCENARIO TEST HARNESS
+# ------------------------------------------------------------
+# This file creates synthetic OHLCV market histories and sends
+# them to evaluate_market().
+#
+# It does NOT:
+# - modify strategy.py
+# - connect to a broker
+# - place trades
+# - modify existing project files
+# ============================================================
+
+
+def make_history(
+    closes,
+    volumes=None,
+    high_spread=0.002,
+    low_spread=0.002,
+):
+    """
+    Convert a sequence of closing prices into an OHLCV DataFrame.
+    """
+
+    closes = np.asarray(closes, dtype=float)
+    n = len(closes)
+
+    if volumes is None:
+        volumes = np.full(n, 1_000_000, dtype=float)
+    else:
+        volumes = np.asarray(volumes, dtype=float)
+
+    opens = np.empty(n, dtype=float)
+    opens[0] = closes[0]
+    opens[1:] = closes[:-1]
+
+    highs = np.maximum(opens, closes) * (1 + high_spread)
+    lows = np.minimum(opens, closes) * (1 - low_spread)
+
+    return pd.DataFrame(
+        {
+            "Open": opens,
+            "High": highs, 
+            "Low": lows,
+            "Close": closes,
+            "Volume": volumes,
+        }
+    )
+
+
+def bullish_history():
+    closes = np.linspace(100, 125, 80)
+    volumes = np.linspace(900_000, 1_600_000, 80)
+
+    return make_history(closes, volumes)
+
+
+def bearish_history():
+    closes = np.linspace(125, 100, 80)
+    volumes = np.linspace(900_000, 1_600_000, 80)
+
+    return make_history(closes, volumes)
+
+
+def sideways_history():
+    x = np.linspace(0, 8 * np.pi, 80)
+    closes = 100 + np.sin(x) * 0.35
+    volumes = np.full(80, 1_000_000)
+
+    return make_history(closes, volumes)
+
+
+def breakout_history():
+    base = np.linspace(100, 103, 70)
+    breakout = np.array(
+        [
+            103.2,
+            103.4,
+            103.8,
+            104.3,
+            105.0,
+            106.0,
+            107.2,
+            108.5,
+            110.0,
+            112.0,
+        ]
+    )
+
+    closes = np.concatenate([base, breakout])
+
+    volumes = np.concatenate(
+        [
+            np.full(70, 1_000_000),
+            np.linspace(1_500_000, 3_500_000, 10),
+        ]
+    )
+
+    return make_history(closes, volumes)
+
+
+def failed_breakout_history():
+    # Stable market leading into resistance near 103.
+    base = np.linspace(100, 103, 68)
+
+    # Price pushes above resistance, attracts volume,
+    # then fails to hold the breakout and falls back below 103.
+    failed_breakout = np.array(
+        [
+            103.2,
+            103.8,
+            104.6,
+            105.4,
+            106.0,
+            105.6,
+            104.8,
+            103.9,
+            102.9,
+            102.4,
+        ]
+    )
+
+    closes = np.concatenate([base, failed_breakout])
+
+    volumes = np.concatenate(
+        [
+            np.full(68, 1_000_000),
+            np.array(
+                [
+                    1_200_000,
+                    1_500_000,
+                    2_000_000,
+                    2_800_000,
+                    3_500_000,
+                    3_200_000,
+                    2_800_000,
+                    2_400_000,
+                    2_000_000,
+                    1_700_000,
+                ]
+            ),
+        ]
+    )
+
+    return make_history(closes, volumes)
+
+
+def low_volume_history():
+    closes = np.linspace(100, 112, 80)
+
+    volumes = np.concatenate(
+        [
+            np.full(70, 1_500_000),
+            np.full(10, 150_000),
+        ]
+    )
+
+    return make_history(closes, volumes)
+
+
+def high_volatility_history():
+    rng = np.random.default_rng(42)
+
+    returns = rng.normal(
+        loc=0.001,
+        scale=0.055,
+        size=80,
+    )
+
+    closes = 100 * np.cumprod(1 + returns)
+    volumes = rng.integers(
+        900_000,
+        2_500_000,
+        size=80,
+    )
+
+    return make_history(
+        closes,
+        volumes,
+        high_spread=0.015,
+        low_spread=0.015,
+    )
+
+
+def conflicting_signal_history():
+    # Controlled conflict:
+    # Longer-term price structure rises, but the latest movement reverses down.
+    # This is intended to create opposing technical evidence without
+    # deliberately creating an upside or downside breakout.
+
+    first = np.linspace(100, 112, 60)
+
+    second = np.array([
+        112.0,
+        112.5,
+        113.0,
+        113.5,
+        114.0,
+        114.5,
+        115.0,
+        115.5,
+        116.0,
+        116.5,
+        117.0,
+        117.5,
+        118.0,
+        118.5,
+        119.0,
+        119.5,
+        120.0,
+        120.5,
+        121.0,
+        120.5,
+        120.0,
+        119.5,
+        119.0,
+        118.5,
+        118.0,
+        117.5,
+        117.0,
+        116.5,
+        116.0,
+        115.5,
+        115.0,
+        114.5,
+        114.0,
+        113.5,
+        113.0,
+        112.5,
+        112.0,
+    ])
+
+    closes = np.concatenate([first, second])
+
+    volumes = np.concatenate([
+        np.full(60, 1_000_000),
+        np.linspace(1_000_000, 1_400_000, len(second)),
+    ])
+
+    return make_history(closes, volumes)
+
+
+def missing_data_history():
+    history = bullish_history()
+
+    # Deliberately remove a required OHLCV column.
+    return history.drop(columns=["Volume"])
+
+
+SCENARIOS = {
+    "BULLISH_OVERBOUGHT_RSI": bullish_history,
+    "BEARISH_OVERSOLD_RSI": bearish_history,
+
+
+    "BULLISH": bullish_history,
+    "BEARISH": bearish_history,
+    "SIDEWAYS": sideways_history,
+    "BREAKOUT": breakout_history,
+    "FAILED_BREAKOUT": failed_breakout_history,
+    "LOW_VOLUME": low_volume_history,
+    "HIGH_VOLATILITY": high_volatility_history,
+    "CONFLICTING_SIGNAL": conflicting_signal_history,
+    "MISSING_DATA": missing_data_history,
+}
+
+
+def print_result(name, result):
+    print("\n" + "=" * 72)
+    print(f"SCENARIO: {name}")
+    print("=" * 72)
+
+    if not isinstance(result, dict):
+        print("ERROR: evaluate_market() did not return a dictionary.")
+        print("RETURNED:", result)
+        return
+
+    observations = result.get("observations", {})
+
+    print(f"Status:          {result.get('status')}")
+    print(f"Signal:          {result.get('signal')}")
+    print(f"Price:           {result.get('price')}")
+    print(f"Volume:          {result.get('volume')}")
+    print(f"Confidence:      {result.get('confidence')}")
+    print(f"Reason:          {result.get('reason')}")
+
+    print("\nObservations")
+    print("-" * 72)
+
+    fields = [
+        "trend",
+        "momentum",
+        "momentum_pct",
+        "volume",
+        "volume_ratio",
+        "volatility",
+        "volatility_value",
+        "breakout",
+        "mean_reversion",
+        "z_score",
+        "vwap",
+        "vwap_price",
+        "rsi",
+        "macd",
+        "bullish_score",
+        "bearish_score",
+        "news_events",
+    ]
+
+    for field in fields:
+        print(f"{field:20}: {observations.get(field)}")
+
+
+def run_scenario(name, builder):
+    try:
+        history = builder()
+        pipeline_result = run_pipeline(history)
+        result = pipeline_result["strategy"]
+
+        print_result(name, result)
+
+        return {
+            "scenario": name,
+            "status": result.get("status") if isinstance(result, dict) else None,
+            "signal": result.get("signal") if isinstance(result, dict) else None,
+            "confidence": (
+                result.get("confidence")
+                if isinstance(result, dict)
+                else None
+            ),
+            "passed_execution_safety": True,
+        }
+
+    except Exception as exc:
+        print("\n" + "=" * 72)
+        print(f"SCENARIO: {name}")
+        print("=" * 72)
+        print(f"TEST HARNESS CAUGHT EXCEPTION: {type(exc).__name__}: {exc}")
+
+        return {
+            "scenario": name,
+            "status": "EXCEPTION",
+            "signal": None,
+            "confidence": None,
+            "passed_execution_safety": True,
+        }
+
+
+
+def main():
+    print("\nATLAS STRATEGY ENGINE - CONTROLLED SCENARIO TEST")
+    print("=" * 72)
+    print("Execution disabled.")
+    print("Broker connection disabled.")
+    print("Testing full run_pipeline() with technical indicators + strategy.")
+
+    summary = []
+
+ # ============================================================
+ # RSI A/B TEST
+ # ============================================================
+
+    print("\n" + "=" * 72)
+    print("RSI A/B TEST")
+    print("=" * 72)
+
+    for label, builder in (
+     ("BULLISH", bullish_history),
+     ("BEARISH", bearish_history),
+ ):
+     history = builder()
+
+     pipeline_result = run_pipeline(history)
+     normal_result = pipeline_result["strategy"]
+     technical = pipeline_result["technical"]
+
+     neutral_technical = dict(technical)
+     neutral_technical["rsi"] = technical["rsi"].copy()
+     neutral_technical["rsi"].iloc[-1] = 50.0
+
+     neutral_result = evaluate_market(history, neutral_technical)
+
+     print(f"\n{label} - NORMAL RSI")
+     print_result(label + "_NORMAL_RSI", normal_result)
+
+     print(f"\n{label} - RSI FORCED NEUTRAL")
+     print_result(label + "_NEUTRAL_RSI", neutral_result)
+
+    # ============================================================
+    # NORMAL CONTROLLED SCENARIOS
+    # ============================================================
+
+    for name, builder in SCENARIOS.items():
+        summary.append(
+            run_scenario(name, builder)
+        )
+
+    print("\n\n" + "=" * 72)
+    print("TEST SUMMARY")
+    print("=" * 72)
+
+    for item in summary:
+        print(
+            f"{item['scenario']:<24}"
+            f"status={item['status']:<14}"
+            f"signal={str(item['signal']):<10}"
+            f"confidence={item['confidence']}"
+        )
+
+    print("\nScenario testing complete.")
+    print("No orders were submitted by this test harness.")
+
+if __name__ == "__main__":
+    main()
