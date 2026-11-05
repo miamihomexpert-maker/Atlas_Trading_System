@@ -42,8 +42,34 @@ def test_candidate_trains_and_reports_sequential_out_of_sample_metrics(tmp_path)
     assert 0 <= candidate["metrics"]["maximum_drawdown"] <= 1
     assert saved["status"] == "candidate"
     assert 0 <= prediction["probability_up"] <= 1
-    assert prediction["signal"] in {"BUY", "WAIT"}
+    assert prediction["signal"] in {"BUY", "SELL", "WAIT"}
     database.close()
+
+
+def test_low_probability_is_a_sell_and_the_middle_band_waits():
+    history = synthetic_history(rows=30)
+    sell = latest_model_probability(
+        history,
+        {
+            "coefficients": [-8, 0, 0, 0, 0, 0, 0, 0],
+            "mean": [0] * 7,
+            "scale": [1] * 7,
+            "threshold": 0.55,
+        },
+    )
+    waiting = latest_model_probability(
+        history,
+        {
+            "coefficients": [0] * 8,
+            "mean": [0] * 7,
+            "scale": [1] * 7,
+            "threshold": 0.55,
+        },
+    )
+
+    assert sell["signal"] == "SELL"
+    assert sell["probability_up"] <= 0.45
+    assert waiting["signal"] == "WAIT"
 
 
 def test_model_training_rejects_insufficient_history():

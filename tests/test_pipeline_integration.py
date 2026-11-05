@@ -51,3 +51,26 @@ def test_adaptive_pipeline_requires_active_model_and_strategy_agreement():
     assert result["adaptive"]["status"] == "ACTIVE"
     assert result["strategy"]["signal"] == "BUY"
     assert result["recommendation"]["instrument"] == "XYZ"
+
+
+def test_adaptive_pipeline_can_confirm_a_sell():
+    model = {
+        "coefficients": [-8, 0, 0, 0, 0, 0, 0, 0],
+        "mean": [0] * 7,
+        "scale": [1] * 7,
+        "threshold": 0.55,
+    }
+
+    class ActiveModelDatabase:
+        def active_model(self):
+            return {"version": "sell-v1", "model": model}
+
+    result = run_adaptive_pipeline(
+        history(start=140, step=-1),
+        ActiveModelDatabase(),
+        "XYZ",
+    )
+
+    assert result["adaptive"]["prediction"]["signal"] == "SELL"
+    assert result["strategy"]["signal"] == "SELL"
+    assert result["recommendation"]["direction"] == "SELL"
