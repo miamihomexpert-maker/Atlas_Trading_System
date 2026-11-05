@@ -12,6 +12,36 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Windows PowerShell
+
+From the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+notepad .env
+.\scripts\paper.ps1
+```
+
+`.\scripts\paper.ps1` loads `.env` if that file exists, without replacing variables already set in the terminal, then runs `python main.py --paper --loop`. `.env` stays gitignored. Do not put a bot token in a committed file. `.env.example` has empty Telegram fields.
+
+Python also reads `.env` when `main.py` starts, and it does not override variables that are already set. Either of these is enough for a new terminal:
+
+```powershell
+.\scripts\paper.ps1
+python main.py --paper --loop
+```
+
+One pass, the book, and module status:
+
+```powershell
+.\scripts\paper.ps1 --paper
+.\scripts\paper.ps1 --status-book
+.\scripts\paper.ps1 --status
+```
+
 ## One paper session
 
 `python main.py` and `python main.py --paper` do the same thing: one pass over the watchlist. They do not start a scheduler.
@@ -30,7 +60,23 @@ Bars come from Yahoo Finance through `yfinance`. The `1h` request uses a `1mo` p
 
 `ATLAS_PAPER_APPROVED=true` is the operator approval for orders in this process. Risk limits still apply on the fill: 1% per trade, 10% exposure, and a 3% daily-loss halt. Omit the variable to score the watchlist without submitting.
 
-The ledger is `database/atlas.sqlite3` unless `ATLAS_DATABASE_PATH` points somewhere else. A later session reloads the paper book from that file.
+The ledger is `database/atlas.sqlite3` unless `ATLAS_DATABASE_PATH` points somewhere else. A later session reloads the paper book, including each open position's stop and target.
+
+## Continuous paper loop
+
+`python main.py --paper --loop` repeats the paper pass. The default pause is 300 seconds (`ATLAS_LOOP_INTERVAL_SECONDS`). Each open-market cycle fetches bars again. Orders still have to pass the existing stale-data check.
+
+The loop runs only during the US regular session, 09:30 inclusive to 16:00 exclusive America/New_York, Monday through Friday. Outside that window it sleeps for the same interval and does not fetch or submit. Exchange holidays are not special-cased. Ctrl+C stops the loop.
+
+On each cycle an open paper long is marked to the latest fresh close. It is sold through the same risk, approval, and paper-broker path if that close is at or through its stored stop, at or through its stored target, or the normal decision is a confirmed `SELL`. A stop or target exit uses the observed close as the paper fill price. The latest buy stores the stop and target, and a restart reads them back from SQLite.
+
+## Book status
+
+```bash
+python main.py --status-book
+```
+
+Prints open positions (quantity, average, last price, stop, target), cash, equity, the ledger's daily P&L, and the latest fills. It does not submit orders.
 
 ## Status only
 
@@ -84,7 +130,9 @@ export ATLAS_TELEGRAM_BOT_TOKEN=your-bot-token
 export ATLAS_TELEGRAM_CHAT_ID=your-private-chat-id
 ```
 
-Telegram messages use `/approve TOKEN` and `/reject TOKEN` in the authorized private chat. Those tokens are consumed by `execute_paper_signal` when a caller supplies one. `ATLAS_PAPER_APPROVED` does not bypass remote approval.
+Telegram messages use `/approve TOKEN` and `/reject TOKEN` in the authorized private chat. Those tokens are consumed by `execute_paper_signal` when a caller supplies one. `ATLAS_PAPER_APPROVED` does not bypass remote approval. With remote approval required, the loop will not submit protective exits either.
+
+If both `ATLAS_TELEGRAM_BOT_TOKEN` and `ATLAS_TELEGRAM_CHAT_ID` are set, a paper fill open, a paper fill close, and a daily-loss halt each send one Telegram message. If either variable is unset, nothing is sent and the session continues. A Telegram failure does not roll back a fill.
 
 ## Tests
 

@@ -142,6 +142,7 @@ def execute_paper_signal(
         client_order_id=client_order_id,
         approved=True,
         stop_loss=float(stop),
+        profit_target=float(target) if side == "BUY" else None,
         limits=limits,
     )
     if remote_approval:
