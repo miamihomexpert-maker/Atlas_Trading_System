@@ -567,35 +567,18 @@ def _protective_exit(
 
 
 def _latest_quote(histories):
+    """Return (as-of timestamp, price) for the newest bar across timeframes.
+
+    The timestamp is when that bar was current, not Yahoo's open label.
+    """
+    from atlas.market_data import freshest_observation
+
     if not histories:
         return None
-    chosen = None
-    for frame in histories.values():
-        if frame is None or getattr(frame, "empty", True):
-            continue
-        stamp = _as_utc(frame.index[-1])
-        try:
-            price = float(frame["Close"].iloc[-1])
-        except (TypeError, ValueError, KeyError):
-            continue
-        if stamp is None or price <= 0:
-            continue
-        if chosen is None or stamp > chosen[0]:
-            chosen = (stamp, price)
-    if chosen is None:
+    observed = freshest_observation(histories)
+    if observed is None:
         return None
-    stamp, price = chosen
-    return stamp.isoformat(), price
-
-
-def _as_utc(stamp):
-    if hasattr(stamp, "to_pydatetime"):
-        stamp = stamp.to_pydatetime()
-    if not isinstance(stamp, datetime):
-        return None
-    if stamp.tzinfo is None:
-        return stamp.replace(tzinfo=timezone.utc)
-    return stamp.astimezone(timezone.utc)
+    return observed["as_of"].isoformat(), observed["price"]
 
 
 def _quote_is_stale(market_timestamp, max_age_seconds):
