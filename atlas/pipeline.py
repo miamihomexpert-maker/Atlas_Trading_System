@@ -1,3 +1,8 @@
+from datetime import datetime, timezone
+import os
+
+from atlas.config import LIVE_TRADING
+from atlas.execution import execute_paper_signal
 from atlas.strategy import evaluate_market
 
 from atlas.technical import calculate_sma, calculate_ema, calculate_rsi, calculate_macd
@@ -139,4 +144,75 @@ def run_adaptive_pipeline(history, database, instrument, news_impact=None):
         "prediction": prediction,
     }
     result["recommendation"] = signal_from_analysis(instrument, strategy_result)
+    return result
+
+
+def _remote_approval_required(explicit):
+    if explicit is not None:
+        return bool(explicit)
+    setting = os.getenv("ATLAS_REQUIRE_REMOTE_APPROVAL", "false").strip().lower()
+    if setting in {"1", "true", "yes"}:
+        return True
+    if setting in {"0", "false", "no", ""}:
+        return False
+    raise ValueError("ATLAS_REQUIRE_REMOTE_APPROVAL must be a boolean value.")
+
+
+def run_paper_pipeline(
+    symbol,
+    histories,
+    broker,
+    client_order_id,
+    approved=False,
+    minimum_agreement=2,
+    limits=None,
+    max_data_age_seconds=900,
+    approval_token=None,
+    approval_chat_id=None,
+    approval_database=None,
+    require_remote_approval=None,
+):
+    """Scan, then send one recommendation through risk, approval, and the paper broker.
+
+    Telegram approval stays optional unless ``require_remote_approval`` is set
+    or ``ATLAS_REQUIRE_REMOTE_APPROVAL`` is true. Live trading is refused.
+    """
+    if LIVE_TRADING:
+        raise PermissionError("Live trading is disabled.")
+    if broker.account_info().get("trading_mode") != "PAPER":
+        raise PermissionError("Live trading is disabled.")
+
+    from atlas.scanner import scan_timeframes
+
+    scanned = scan_timeframes(
+        symbol,
+        histories,
+        minimum_agreement=minimum_agreement,
+    )
+    recommendation = scanned["recommendation"]
+    result = {
+        "symbol": scanned["symbol"],
+        "analysis": scanned["analysis"],
+        "recommendation": recommendation,
+        "order": None,
+        "execution": "NOT_SUBMITTED",
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if recommendation is None:
+        return result
+    if _remote_approval_required(require_remote_approval) and approval_token is None:
+        raise PermissionError("Remote approval token is required.")
+
+    result["order"] = execute_paper_signal(
+        recommendation,
+        broker,
+        client_order_id,
+        approved=approved,
+        limits=limits,
+        max_data_age_seconds=max_data_age_seconds,
+        approval_token=approval_token,
+        approval_chat_id=approval_chat_id,
+        approval_database=approval_database,
+    )
+    result["execution"] = result["order"]["status"]
     return result

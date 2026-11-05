@@ -1,9 +1,16 @@
 from copy import deepcopy
+from datetime import datetime, timezone
 from math import isfinite
+
+from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
 
 
 class PaperBroker:
-    """In-memory, long-only paper broker. It has no live-broker connection."""
+    """In-memory, long-only paper broker. It has no live-broker connection.
+
+    Fills enforce risk limits even when ``approved=True``. When a database is
+    attached and already has a ledger, cash and positions are rebuilt from it.
+    """
 
     def __init__(self, initial_cash=100_000.0, database=None):
         if not isfinite(initial_cash) or initial_cash <= 0:
@@ -14,8 +21,57 @@ class PaperBroker:
         self._history = []
         self._realized_pnl = 0.0
         self._database = database
-        if self._database is not None:
+        if self._database is not None and self._database_has_state():
+            self._restore_from_database()
+        elif self._database is not None:
             self._database.record_initial_account(self.account_info())
+        self._pnl_day = datetime.now(timezone.utc).date().isoformat()
+        self._day_open_equity = self.account_info()["equity"]
+
+    def _database_has_state(self):
+        has_state = getattr(self._database, "has_paper_state", None)
+        return bool(has_state()) if callable(has_state) else False
+
+    def _restore_from_database(self):
+        opening = self._database.first_equity_snapshot()
+        if opening is not None:
+            self._cash = float(opening["equity"])
+            self._realized_pnl = float(opening["realized_pnl"])
+        for row in self._database.replay_paper_orders():
+            order = {
+                "symbol": str(row["symbol"]).strip().upper(),
+                "side": str(row["side"]).strip().upper(),
+                "quantity": int(row["quantity"]),
+                "price": float(row["price"]),
+                "client_order_id": str(row["order_id"]),
+            }
+            realized_delta = self._apply_position_change(order)
+            filled = {
+                **order,
+                "status": "FILLED",
+                "order_id": order["client_order_id"],
+                "realized_pnl": realized_delta,
+            }
+            self._orders[filled["order_id"]] = filled
+            self._history.append(filled)
+        self._reconcile_marks_to_latest_equity()
+
+    def _reconcile_marks_to_latest_equity(self):
+        latest = self._database.latest_equity_snapshot()
+        if not latest or not self._positions:
+            return
+        target_position_value = float(latest["equity"]) - self._cash
+        current_value = sum(
+            position["quantity"] * position["last_price"]
+            for position in self._positions.values()
+        )
+        if current_value <= 0 or target_position_value < 0:
+            return
+        scale = target_position_value / current_value
+        if not isfinite(scale) or scale <= 0:
+            return
+        for position in self._positions.values():
+            position["last_price"] = position["last_price"] * scale
 
     def account_info(self):
         position_value = sum(
@@ -37,6 +93,40 @@ class PaperBroker:
             symbol: dict(position)
             for symbol, position in self._positions.items()
         }
+
+    def current_exposure(self):
+        return sum(
+            position["quantity"] * position["last_price"]
+            for position in self._positions.values()
+        )
+
+    def daily_pnl(self, now=None):
+        """Equity change versus the UTC day's opening equity.
+
+        With a database, the reference is the last snapshot before today, or
+        the first snapshot from today when the book started today.
+        """
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("now must include a timezone.")
+        day_start = now.astimezone(timezone.utc).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        reference = None
+        if self._database is not None and hasattr(self._database, "equity_before"):
+            reference = self._database.equity_before(day_start.isoformat())
+            if reference is None and hasattr(self._database, "earliest_equity_from"):
+                reference = self._database.earliest_equity_from(day_start.isoformat())
+        if reference is None:
+            day_key = day_start.date().isoformat()
+            if self._pnl_day != day_key:
+                self._day_open_equity = self.account_info()["equity"]
+                self._pnl_day = day_key
+            reference = self._day_open_equity
+        return self.account_info()["equity"] - float(reference)
 
     def update_market_price(self, symbol, price):
         symbol = str(symbol).strip().upper()
@@ -82,42 +172,28 @@ class PaperBroker:
             "client_order_id": str(client_order_id).strip(),
         }
 
-    def submit_order(
-        self,
-        symbol,
-        side,
-        quantity,
-        price,
-        client_order_id,
-        approved=False,
-    ):
-        if not approved:
-            raise PermissionError("Order requires explicit human approval.")
-
-        order_id = str(client_order_id).strip()
-        if order_id in self._orders:
-            existing = self._orders[order_id]
-            if (
-                existing["symbol"] != str(symbol).strip().upper()
-                or existing["side"] != str(side).strip().upper()
-                or existing["quantity"] != quantity
-                or existing["price"] != price
-            ):
-                raise ValueError("Client order ID was already used for a different order.")
-            return dict(existing)
-
-        order = self.validate_order(
-            symbol,
-            side,
-            quantity,
+    def _maximum_quantity(self, side, price, stop_loss, limits):
+        if (
+            isinstance(stop_loss, bool)
+            or not isinstance(stop_loss, (int, float))
+            or not isfinite(stop_loss)
+            or stop_loss <= 0
+        ):
+            raise ValueError("stop_loss is required to enforce per-trade risk.")
+        if side == "BUY" and not stop_loss < price:
+            raise ValueError("BUY orders require stop_loss below the entry price.")
+        if side == "SELL" and not stop_loss > price:
+            raise ValueError("SELL orders require stop_loss above the entry price.")
+        equity = self.account_info()["equity"]
+        return calculate_position_size(
+            equity,
             price,
-            order_id,
+            stop_loss,
+            limits,
+            current_exposure=self.current_exposure() if side == "BUY" else 0.0,
         )
-        previous_state = (
-            self._cash,
-            deepcopy(self._positions),
-            self._realized_pnl,
-        )
+
+    def _apply_position_change(self, order):
         total = order["quantity"] * order["price"]
         symbol = order["symbol"]
         realized_delta = 0.0
@@ -150,7 +226,69 @@ class PaperBroker:
                 del self._positions[symbol]
             else:
                 current["last_price"] = order["price"]
+        return realized_delta
 
+    def submit_order(
+        self,
+        symbol,
+        side,
+        quantity,
+        price,
+        client_order_id,
+        approved=False,
+        stop_loss=None,
+        limits=None,
+    ):
+        """Fill a paper order. Approval does not waive risk limits."""
+        if not approved:
+            raise PermissionError("Order requires explicit human approval.")
+
+        limits = limits or RiskLimits()
+        order_id = str(client_order_id).strip()
+        if order_id in self._orders:
+            existing = self._orders[order_id]
+            if (
+                existing["symbol"] != str(symbol).strip().upper()
+                or existing["side"] != str(side).strip().upper()
+                or existing["quantity"] != quantity
+                or existing["price"] != price
+            ):
+                raise ValueError("Client order ID was already used for a different order.")
+            return dict(existing)
+
+        order = self.validate_order(
+            symbol,
+            side,
+            quantity,
+            price,
+            order_id,
+        )
+        if not validate_daily_loss(
+            self.account_info()["equity"],
+            self.daily_pnl(),
+            limits,
+        ):
+            raise PermissionError("Daily loss limit reached; trading is halted.")
+        max_quantity = self._maximum_quantity(
+            order["side"],
+            order["price"],
+            stop_loss,
+            limits,
+        )
+        if order["side"] == "SELL":
+            max_quantity = min(
+                max_quantity,
+                self._positions.get(order["symbol"], {}).get("quantity", 0),
+            )
+        if order["quantity"] > max_quantity:
+            raise ValueError("Requested quantity exceeds the configured risk limit.")
+
+        previous_state = (
+            self._cash,
+            deepcopy(self._positions),
+            self._realized_pnl,
+        )
+        realized_delta = self._apply_position_change(order)
         filled = {
             **order,
             "status": "FILLED",

@@ -100,6 +100,7 @@ def test_paper_broker_requires_approval_and_prevents_duplicate_orders():
         100,
         "order-1",
         approved=True,
+        stop_loss=90,
     )
     duplicate = broker.submit_order(
         "XYZ",
@@ -108,6 +109,7 @@ def test_paper_broker_requires_approval_and_prevents_duplicate_orders():
         100,
         "order-1",
         approved=True,
+        stop_loss=90,
     )
 
     assert order == duplicate
@@ -121,6 +123,7 @@ def test_paper_broker_requires_approval_and_prevents_duplicate_orders():
             100,
             "order-1",
             approved=True,
+            stop_loss=90,
         )
 
 
@@ -159,6 +162,7 @@ def test_risk_sized_sell_can_reduce_a_position_at_exposure_limit():
         10,
         "entry",
         approved=True,
+        stop_loss=9,
     )
     signal = {
         "instrument": "XYZ",
@@ -179,6 +183,83 @@ def test_risk_sized_sell_can_reduce_a_position_at_exposure_limit():
     assert order["side"] == "SELL"
     assert order["quantity"] == 10
     assert broker.positions() == {}
+
+
+def test_approved_order_without_a_stop_is_rejected():
+    broker = PaperBroker(initial_cash=10_000)
+
+    with pytest.raises(ValueError, match="stop_loss"):
+        broker.submit_order("XYZ", "BUY", 1, 100, "no-stop", approved=True)
+
+    assert broker.positions() == {}
+
+
+def test_approved_order_cannot_bypass_sizing_caps():
+    broker = PaperBroker(initial_cash=10_000)
+
+    with pytest.raises(ValueError, match="risk limit"):
+        broker.submit_order(
+            "XYZ",
+            "BUY",
+            11,
+            100,
+            "too-large",
+            approved=True,
+            stop_loss=90,
+        )
+
+    assert broker.positions() == {}
+    assert broker.account_info()["cash"] == 10_000
+
+
+def test_daily_loss_uses_broker_pnl_not_the_caller_argument():
+    broker = PaperBroker(initial_cash=10_000)
+    broker.submit_order(
+        "XYZ",
+        "BUY",
+        10,
+        100,
+        "entry",
+        approved=True,
+        stop_loss=90,
+    )
+    broker.update_market_price("XYZ", 70)
+    signal = make_buy_signal(entry_price=70, stop_loss=69, profit_target=72)
+
+    with pytest.raises(PermissionError, match="Daily loss"):
+        execute_paper_signal(
+            signal,
+            broker,
+            "caller-says-flat",
+            approved=True,
+            daily_pnl=0.0,
+        )
+    with pytest.raises(PermissionError, match="Daily loss"):
+        broker.submit_order(
+            "XYZ",
+            "BUY",
+            1,
+            70,
+            "direct-buy",
+            approved=True,
+            stop_loss=69,
+        )
+    assert broker.positions()["XYZ"]["quantity"] == 10
+
+
+def test_caller_loss_figure_cannot_halt_a_flat_broker():
+    broker = PaperBroker(initial_cash=10_000)
+
+    order = execute_paper_signal(
+        make_buy_signal(),
+        broker,
+        "ignore-caller-loss",
+        approved=True,
+        daily_pnl=-10_000,
+    )
+
+    assert order["status"] == "FILLED"
+    assert order["quantity"] == 10
 
 
 def test_configuration_cannot_enable_live_trading(monkeypatch):
