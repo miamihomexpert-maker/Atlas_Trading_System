@@ -43,6 +43,7 @@ class PaperDashboard:
         news_events=None,
         candle_loader=None,
         hard_stop=None,
+        name_loader=None,
     ):
         if not token or not str(token).strip():
             raise ValueError("Dashboard token is required.")
@@ -66,6 +67,8 @@ class PaperDashboard:
         )
         self._trained = False
         self.candle_loader = candle_loader
+        self.name_loader = name_loader
+        self._names = {}
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
 
@@ -92,6 +95,27 @@ class PaperDashboard:
         if broker.account_info().get("trading_mode") != "PAPER":
             raise PermissionError("Live trading is disabled.")
         return broker
+
+    def _instrument_name(self, symbol):
+        """Use a name only when a loader returns one. Never invent one."""
+        if self.name_loader is None:
+            return None
+        if symbol not in self._names:
+            try:
+                value = self.name_loader(symbol)
+            except Exception:
+                value = None
+            if not isinstance(value, str) or not value.strip() or value.strip().upper() == symbol:
+                value = None
+            else:
+                value = value.strip()
+            self._names[symbol] = value
+        return self._names[symbol]
+
+    def _described(self, card):
+        card["name"] = self._instrument_name(card["symbol"])
+        card["copy"] = describe_scan(card)
+        return card
 
     def _prepare(self):
         if not self._news_explicit:
@@ -193,16 +217,18 @@ class PaperDashboard:
         for symbol in self.settings.instruments:
             histories = self._histories(symbol)
             if not histories:
-                scans.append(_empty_scan(symbol, "No market bars returned."))
+                scans.append(self._described(_empty_scan(symbol, "No market bars returned.")))
                 skipped.append(f"{symbol} has no market bars.")
                 continue
             try:
                 preview = self._preview(symbol, broker, histories)
             except Exception as error:
-                scans.append(_empty_scan(symbol, str(error)))
+                scans.append(self._described(_empty_scan(symbol, str(error))))
                 skipped.append(f"{symbol} could not be scored: {error}")
                 continue
             card = _scan_card(symbol, preview, broker)
+            card["name"] = self._instrument_name(card["symbol"])
+            card["copy"] = describe_scan(card)
             scans.append(card)
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
@@ -363,6 +389,127 @@ class PaperDashboard:
         if alert is None or alert["status"] != "PENDING":
             raise ValueError("That sell recommendation is no longer pending.")
         return self.sell(token, alert["symbol"], alert_id=alert["id"])
+
+
+def lookup_instrument_name(symbol):
+    """Return Yahoo's short or long name when the feed includes one."""
+    try:
+        import yfinance as yf
+
+        info = getattr(yf.Ticker(str(symbol).strip().upper()), "info", None) or {}
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    for key in ("shortName", "longName"):
+        value = info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def describe_scan(card):
+    """Plain-language lines for one symbol. Uses only fields already on the card."""
+    decision = card.get("decision") or "unavailable"
+    decision_text = {
+        "BUY": "This is a buy. The checks that have to agree are in favor of buying.",
+        "SELL": "This is a sell. The checks that have to agree are in favor of selling.",
+        "WAIT": "This is a wait. It is not a buy or a sell right now.",
+        "NO_DATA": "There are no price bars, so there is nothing to trade.",
+    }.get(decision, "The scan did not return a buy or a sell.")
+    reason = str(card.get("reason") or "").strip()
+    if "Insufficient timeframe agreement" in reason:
+        why = "The timeframes do not agree, so this stays a wait."
+    elif reason:
+        why = reason if reason.endswith(".") else reason + "."
+    elif decision == "WAIT":
+        why = "The timeframes do not agree on a buy or a sell."
+    else:
+        why = decision_text
+    lines = []
+    labels = {
+        "1m": "1 minute",
+        "5m": "5 minute",
+        "15m": "15 minute",
+        "30m": "30 minute",
+        "1h": "1 hour",
+        "1d": "daily",
+        "1w": "weekly",
+    }
+    signal_words = {"BUY": "buy", "SELL": "sell", "WAIT": "wait"}
+    trend_words = {"BULLISH": "up", "BEARISH": "down", "NEUTRAL": "flat"}
+    for name, frame in (card.get("timeframes") or {}).items():
+        label = labels.get(name, name)
+        signal = signal_words.get(frame.get("signal"), "no clear signal")
+        parts = [f"The {label} chart says {signal}."]
+        trend = trend_words.get(frame.get("trend"))
+        if trend:
+            parts.append(f"The trend is {trend}.")
+        if frame.get("bullish_score") is not None and frame.get("bearish_score") is not None:
+            parts.append(
+                f"It counted {frame['bullish_score']} reasons to buy and {frame['bearish_score']} reasons to sell."
+            )
+        lines.append(" ".join(parts))
+    news = card.get("news") or {}
+    news_status = news.get("status")
+    headlines = news.get("headlines") or []
+    if news_status == "FETCH_FAILED":
+        news_text = "The news feed did not return headlines."
+    elif not news_status:
+        news_text = "News has not been loaded for this symbol."
+    elif not headlines:
+        news_text = "No headlines were matched to this symbol."
+    else:
+        news_text = (
+            f"The feed returned {len(headlines)} headline."
+            if len(headlines) == 1
+            else f"The feed returned {len(headlines)} headlines."
+        )
+    model = card.get("model") or {}
+    model_status = model.get("status")
+    probability = model.get("probability_up")
+    probability_text = None
+    if isinstance(probability, (int, float)) and not isinstance(probability, bool):
+        probability_text = (
+            f"It calculated a {float(probability):.0%} chance the next daily bar closes higher."
+        )
+    if model_status == "CANDIDATE_NOT_PROMOTED":
+        model_text = (
+            "A model was trained, but it did not pass the checks required before it can help decide trades."
+        )
+        if probability_text:
+            model_text += " " + probability_text + " That number is not being used for the decision."
+    elif model_status == "ACTIVE":
+        model_text = "A promoted model is allowed to confirm or withhold a buy or sell."
+        if probability_text:
+            model_text += " " + probability_text
+        if model.get("signal"):
+            model_text += f" The model itself says {str(model['signal']).lower()}."
+    elif model_status == "INSUFFICIENT_HISTORY":
+        model_text = "There was not enough price history to train a model."
+    elif model_status == "NO_ACTIVE_MODEL":
+        model_text = "No model is stored yet."
+    elif model_status:
+        model_text = str(model.get("reason") or "The model did not return a decision.")
+        if probability_text:
+            model_text += " " + probability_text
+    else:
+        model_text = "No model result is available."
+    buy_enabled = bool(card.get("buyable"))
+    return {
+        "decision": decision_text,
+        "why": why,
+        "timeframes": lines,
+        "news": news_text,
+        "model": model_text,
+        "buy_enabled": buy_enabled,
+        "buy_note": (
+            "Buy is available. You still have to confirm before any paper order is sent."
+            if buy_enabled
+            else why
+        ),
+        "sell_note": "No open paper position.",
+    }
 
 
 def _empty_scan(symbol, reason):
@@ -632,7 +779,11 @@ def serve_dashboard(port=None, service=None):
         raise PermissionError("Live trading is disabled.")
     port = int(port or os.getenv("ATLAS_DASHBOARD_PORT", "8765"))
     if service is None:
-        service = PaperDashboard(token=secrets.token_urlsafe(24), settings=settings)
+        service = PaperDashboard(
+            token=secrets.token_urlsafe(24),
+            settings=settings,
+            name_loader=lookup_instrument_name,
+        )
     _DashboardHandler.service = service
     server = ThreadingHTTPServer(("127.0.0.1", port), _DashboardHandler)
     host, bound_port = server.server_address
