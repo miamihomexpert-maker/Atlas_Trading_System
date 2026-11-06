@@ -26,8 +26,8 @@ def _buy_signal(market_timestamp):
 
 
 def test_forming_hourly_bar_is_fresh_and_its_open_label_is_not():
-    now = datetime(2026, 11, 5, 19, 12, tzinfo=timezone.utc)  # 14:12 ET
-    opened = now - timedelta(minutes=42)  # 13:30 ET open of the current hour
+    now = datetime.now(timezone.utc)
+    opened = now - timedelta(minutes=42)
     as_of = bar_as_of(opened, "1h", now)
 
     assert abs((as_of - now).total_seconds()) < 1

@@ -13,13 +13,14 @@ from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
 from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
+from atlas.baseline import auto_train_enabled, ensure_baseline_model
+from atlas.news_feed import resolve_news
 from atlas.session import (
     _exit_signal,
     _latest_quote,
     _quote_is_stale,
     fetch_session_histories,
     hard_stop_enabled,
-    load_news_events,
     resolve_timeframes,
 )
 from atlas.pipeline import run_paper_pipeline
@@ -56,7 +57,14 @@ class PaperDashboard:
                 os.getenv("ATLAS_DATABASE_PATH", "database/atlas.sqlite3")
             )
         self.histories_by_symbol = histories_by_symbol
-        self.news_events = [] if news_events is None else news_events
+        self._news_explicit = news_events is not None
+        self.news_events = list(news_events or [])
+        self.news_report = (
+            {"status": "OVERRIDE", "error": None, "source": "caller"}
+            if self._news_explicit
+            else None
+        )
+        self._trained = False
         self.candle_loader = candle_loader
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
@@ -85,7 +93,15 @@ class PaperDashboard:
             raise PermissionError("Live trading is disabled.")
         return broker
 
+    def _prepare(self):
+        if not self._news_explicit:
+            self.news_events, self.news_report = resolve_news(self.settings.instruments)
+        if not self._trained and auto_train_enabled():
+            ensure_baseline_model(self.database, self.settings.instruments)
+            self._trained = True
+
     def _preview(self, symbol, broker, histories):
+        self._prepare()
         return run_paper_pipeline(
             symbol,
             histories,
@@ -94,6 +110,7 @@ class PaperDashboard:
             approved=False,
             database=self.database,
             news_events=self.news_events,
+            news_report=self.news_report,
             execute=False,
             max_data_age_seconds=self.settings.max_market_data_age_seconds,
         )
@@ -168,6 +185,7 @@ class PaperDashboard:
         return rows
 
     def candidates(self):
+        self._prepare()
         broker = self._broker()
         qualified = []
         skipped = []
@@ -183,8 +201,12 @@ class PaperDashboard:
                 continue
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
+                decision = preview.get("decision") or preview.get("status") or "unavailable"
+                reason = (preview.get("analysis") or {}).get("reason") or ""
+                news_status = (preview.get("news") or {}).get("status")
+                model_status = (preview.get("adaptive") or {}).get("status")
                 skipped.append(
-                    f"{symbol} is {preview.get('decision') or preview.get('status') or 'unavailable'}."
+                    f"{symbol} is {decision}. {reason} News {news_status}. Model {model_status}."
                 )
                 continue
             quantity = calculate_position_size(
@@ -370,6 +392,15 @@ def _reasons(preview):
     reasons.append(f"Technical decision: {preview.get('decision')}")
     news = preview.get("news") or {}
     reasons.append(f"News: {news.get('status', 'not assessed')}")
+    headlines = news.get("headlines") or []
+    if headlines:
+        reasons.append("Headlines: " + " | ".join(str(item) for item in headlines[:3]))
+    prediction = (preview.get("adaptive") or {}).get("prediction") or {}
+    if isinstance(prediction.get("probability_up"), (int, float)):
+        reasons.append(
+            f"Model probability up {float(prediction['probability_up']):.4f} "
+            f"signal {prediction.get('signal')}"
+        )
     adaptive = preview.get("adaptive") or {}
     model = adaptive.get("status", "not assessed")
     if adaptive.get("version"):

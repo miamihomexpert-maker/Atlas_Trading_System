@@ -1,7 +1,5 @@
 from datetime import datetime, timezone
-import json
 import os
-from pathlib import Path
 import time
 import uuid
 
@@ -11,7 +9,6 @@ from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
 from atlas.market_hours import regular_session_status
-from atlas.news import NewsEvent
 from atlas.pipeline import _remote_approval_required, run_paper_pipeline
 from config.settings import load_settings
 
@@ -85,31 +82,14 @@ def fetch_session_histories(symbol, timeframes):
 
 
 def load_news_events(path=None):
-    """Load caller-supplied news. No file means there is nothing to assess."""
+    """Load the JSON news override. An unset path returns an empty list."""
+    from atlas.news_feed import load_news_file
+
     if path is None:
-        path = os.getenv("ATLAS_NEWS_FILE")
+        path = os.getenv("ATLAS_NEWS_FILE", "").strip()
     if not path:
         return []
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError("ATLAS_NEWS_FILE must contain a JSON list of events.")
-    events = []
-    for item in payload:
-        published_at = datetime.fromisoformat(
-            str(item["published_at"]).replace("Z", "+00:00")
-        )
-        events.append(
-            NewsEvent(
-                event_id=item["event_id"],
-                title=item["title"],
-                category=item["category"],
-                published_at=published_at,
-                sentiment=float(item["sentiment"]),
-                impact=float(item["impact"]),
-                instruments=tuple(item.get("instruments") or ()),
-            )
-        )
-    return events
+    return load_news_file(path)
 
 
 def run_paper_session(
@@ -142,7 +122,11 @@ def run_paper_session(
     if approved is None:
         approved = _env_flag("ATLAS_PAPER_APPROVED", False)
     if news_events is None:
-        news_events = load_news_events()
+        from atlas.news_feed import resolve_news
+
+        news_events, news_report = resolve_news(settings.instruments)
+    else:
+        news_report = {"status": "OVERRIDE", "error": None, "source": "caller"}
 
     created_database = database is None
     results = []
@@ -158,6 +142,10 @@ def run_paper_session(
             )
         if broker.account_info().get("trading_mode") != "PAPER":
             raise PermissionError("Live trading is disabled.")
+        from atlas.baseline import auto_train_enabled, ensure_baseline_model
+
+        if auto_train_enabled():
+            ensure_baseline_model(database, settings.instruments)
 
         results.extend(
             _collect_cycle_results(
@@ -168,6 +156,7 @@ def run_paper_session(
                 minimum_agreement,
                 histories_by_symbol,
                 news_events,
+                news_report,
                 approved,
                 require_remote_approval,
                 manual_exits=manual_exits,
@@ -208,6 +197,7 @@ def _run_symbol(
     minimum_agreement,
     histories_by_symbol,
     news_events,
+    news_report,
     approved,
     require_remote_approval,
     max_market_data_age_seconds,
@@ -240,6 +230,7 @@ def _run_symbol(
             require_remote_approval=require_remote_approval,
             database=database,
             news_events=news_events,
+            news_report=news_report,
             execute=not manual_exits,
         )
         if (
@@ -470,6 +461,7 @@ def _collect_cycle_results(
     minimum_agreement,
     histories_by_symbol,
     news_events,
+    news_report,
     approved,
     require_remote_approval,
     manual_exits=False,
@@ -517,6 +509,7 @@ def _collect_cycle_results(
                 minimum_agreement,
                 {str(symbol).strip().upper(): histories},
                 news_events,
+                news_report,
                 approved,
                 require_remote_approval,
                 settings.max_market_data_age_seconds,
