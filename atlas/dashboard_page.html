@@ -7,9 +7,8 @@
 <style>
   :root {
     --bg: #07111f;
-    --bg-2: #0c1b30;
-    --line: rgba(92, 214, 255, 0.35);
-    --glow: rgba(64, 196, 255, 0.18);
+    --line: rgba(92, 214, 255, 0.38);
+    --glow: rgba(64, 196, 255, 0.16);
     --text: #e7f6ff;
     --muted: #8eabc4;
     --up: #3ee0a2;
@@ -17,79 +16,70 @@
     --amber: #ffc857;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0;
-    min-height: 100vh;
     color: var(--text);
-    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
     background:
-      radial-gradient(circle at 50% 120%, rgba(32, 120, 180, 0.28), transparent 42%),
-      radial-gradient(circle at 80% 10%, rgba(40, 90, 160, 0.2), transparent 28%),
+      radial-gradient(circle at 50% 110%, rgba(32, 120, 180, 0.35), transparent 46%),
+      radial-gradient(circle at 12% 0%, rgba(40, 90, 160, 0.22), transparent 30%),
       var(--bg);
   }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 18px;
-    padding: 16px 22px 8px;
-  }
-  .mark { width: 54px; height: 54px; filter: drop-shadow(0 0 8px rgba(80, 200, 255, 0.65)); }
-  h1 {
-    margin: 0;
-    font-size: 28px;
-    letter-spacing: 0.18em;
-    font-weight: 700;
-  }
-  .sub { margin: 2px 0 0; color: var(--muted); letter-spacing: 0.22em; font-size: 11px; }
-  .badge {
-    margin-left: auto;
-    border: 1px solid var(--amber);
-    color: var(--amber);
-    padding: 6px 12px;
-    letter-spacing: 0.16em;
-    font-weight: 700;
-  }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px 6px; }
+  .mark { width: 46px; height: 46px; filter: drop-shadow(0 0 8px rgba(80, 200, 255, 0.65)); }
+  h1 { margin: 0; font-size: 26px; letter-spacing: 0.18em; }
+  .sub { margin: 0; color: var(--muted); letter-spacing: 0.18em; font-size: 11px; }
+  .badge { margin-left: auto; border: 1px solid var(--amber); color: var(--amber); padding: 6px 12px; letter-spacing: 0.16em; font-weight: 700; }
   .layout {
+    flex: 1;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 280px 1fr 320px;
-    gap: 14px;
-    padding: 12px 18px 22px;
+    grid-template-columns: 300px minmax(0, 1fr) 340px;
+    gap: 12px;
+    padding: 8px 14px 14px;
   }
-  .panel {
-    background: linear-gradient(180deg, rgba(12, 32, 56, 0.92), rgba(7, 16, 30, 0.92));
+  .panel, .subpanel {
+    background: linear-gradient(180deg, rgba(12, 32, 56, 0.94), rgba(7, 16, 30, 0.94));
     border: 1px solid var(--line);
-    box-shadow: inset 0 0 24px var(--glow);
-    padding: 12px 14px 16px;
+    box-shadow: inset 0 0 22px var(--glow);
   }
-  h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: 0.14em; color: #9adfff; font-weight: 650; }
-  .symbol-btn, .tf-btn, button {
-    font: inherit;
-    color: var(--text);
-    background: transparent;
-    border: 1px solid var(--line);
-    padding: 6px 10px;
-    cursor: pointer;
+  .panel { padding: 12px 14px; min-height: 0; overflow: auto; }
+  .center { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  .chart-wrap { flex: 1; min-height: 240px; display: flex; flex-direction: column; padding: 12px 14px; }
+  canvas { width: 100%; flex: 1; min-height: 220px; background: rgba(0, 0, 0, 0.28); }
+  h2 { margin: 12px 0 8px; font-size: 12px; letter-spacing: 0.14em; color: #9adfff; }
+  h2:first-child { margin-top: 0; }
+  .label { color: var(--muted); font-size: 11px; letter-spacing: 0.14em; margin-bottom: 6px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  button, .symbol-btn, .tf-btn {
+    font: inherit; color: var(--text); background: rgba(8, 20, 36, 0.8);
+    border: 1px solid var(--line); padding: 7px 12px; cursor: pointer;
   }
-  .symbol-btn.active, .tf-btn.active { border-color: #7ad7ff; color: #dff6ff; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-  canvas { width: 100%; height: 320px; display: block; background: rgba(0, 0, 0, 0.25); }
+  .symbol-btn.active, .tf-btn.active { border-color: #7ad7ff; box-shadow: inset 0 0 10px var(--glow); }
   .muted { color: var(--muted); }
-  .card { border-top: 1px solid rgba(122, 215, 255, 0.2); padding: 10px 0; }
-  .card strong { letter-spacing: 0.08em; }
+  .card, .quote { border-top: 1px solid rgba(122, 215, 255, 0.18); padding: 8px 0; }
+  .decision { font-weight: 700; letter-spacing: 0.08em; }
+  .decision.BUY { color: var(--up); }
+  .decision.SELL { color: var(--down); }
+  .decision.WAIT, .decision.NO_DATA { color: var(--amber); }
   .buy { border-color: var(--up); color: var(--up); }
   .sell { border-color: var(--down); color: var(--down); }
   .alert { border: 1px solid var(--amber); padding: 8px; margin-bottom: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  td, th { text-align: left; padding: 4px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); }
-  .modal {
-    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62);
-    display: none; align-items: center; justify-content: center;
-  }
-  .modal.open { display: flex; }
-  .modal .panel { max-width: 420px; }
+  td { padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); vertical-align: top; }
+  .detail { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr; gap: 10px; }
+  .subpanel { padding: 10px 12px; min-height: 140px; }
   .error { color: var(--down); }
+  .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62); display: none; align-items: center; justify-content: center; }
+  .modal.open { display: flex; }
+  .modal .panel { max-width: 440px; }
   @media (max-width: 1100px) {
-    .layout { grid-template-columns: 1fr; }
+    body { overflow: auto; height: auto; }
+    .layout, .detail { display: block; }
+    .panel, .subpanel, .chart-wrap { margin-bottom: 10px; }
   }
 </style>
 </head>
@@ -110,17 +100,28 @@
   <section class="panel">
     <h2>WATCHLIST</h2>
     <div id="watchlist" class="muted">Loading ledger…</div>
-    <h2 style="margin-top:16px">PORTFOLIO</h2>
+    <h2>PORTFOLIO</h2>
     <div id="portfolio" class="muted">—</div>
-    <h2 style="margin-top:16px">RECENT FILLS</h2>
+    <h2>OPEN POSITIONS</h2>
+    <div id="positions" class="muted">—</div>
+    <h2>RECENT FILLS</h2>
     <div id="fills" class="muted">—</div>
   </section>
-  <section class="panel">
-    <div class="row" id="timeframes"></div>
-    <canvas id="chart" width="800" height="320"></canvas>
-    <p id="chart-note" class="muted"></p>
-    <h2>SELL RECOMMENDED</h2>
-    <div id="alerts" class="muted">No exit alerts.</div>
+  <section class="center">
+    <div class="panel chart-wrap">
+      <div class="label">SYMBOL</div>
+      <div class="row" id="symbols"></div>
+      <div class="label">TIMEFRAME</div>
+      <div class="row" id="timeframes"></div>
+      <canvas id="chart" width="900" height="360"></canvas>
+      <p id="chart-note" class="muted"></p>
+    </div>
+    <div class="detail">
+      <div class="subpanel" id="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
+      <div class="subpanel" id="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
+      <div class="subpanel" id="model"><h2>MODEL</h2><p class="muted">Waiting for a stored model.</p></div>
+    </div>
+    <div class="panel" id="alerts"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
   </section>
   <section class="panel">
     <h2>TOP 3 BUY CANDIDATES</h2>
@@ -140,13 +141,14 @@
 </div>
 <script>
 const TOKEN = "__ATLAS_LOCAL_TOKEN__";
-const state = { symbol: null, timeframe: null, pending: null };
+const state = { symbol: null, timeframe: null, scans: [] };
 const chart = document.getElementById("chart");
 
 function money(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
   return Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+function text(value) { return value === null || value === undefined || value === "" ? "—" : String(value); }
 
 function confirmTrade(title, body) {
   return new Promise((resolve) => {
@@ -158,14 +160,12 @@ function confirmTrade(title, body) {
     const cancel = document.getElementById("modal-cancel");
     function done(value) {
       modal.classList.remove("open");
-      ok.removeEventListener("click", onOk);
-      cancel.removeEventListener("click", onCancel);
+      ok.onclick = null;
+      cancel.onclick = null;
       resolve(value);
     }
-    function onOk() { done(true); }
-    function onCancel() { done(false); }
-    ok.addEventListener("click", onOk);
-    cancel.addEventListener("click", onCancel);
+    ok.onclick = () => done(true);
+    cancel.onclick = () => done(false);
   });
 }
 
@@ -182,7 +182,7 @@ async function post(path, body) {
 
 function drawCandles(candles) {
   const width = chart.clientWidth || 800;
-  const height = 320;
+  const height = chart.clientHeight || 320;
   const ratio = window.devicePixelRatio || 1;
   chart.width = width * ratio;
   chart.height = height * ratio;
@@ -196,10 +196,8 @@ function drawCandles(candles) {
     ctx.fillText("No bars returned.", 16, 28);
     return;
   }
-  const highs = candles.map((bar) => bar.high);
-  const lows = candles.map((bar) => bar.low);
-  const max = Math.max(...highs);
-  const min = Math.min(...lows);
+  const max = Math.max(...candles.map((bar) => bar.high));
+  const min = Math.min(...candles.map((bar) => bar.low));
   const span = max - min || 1;
   const slot = width / candles.length;
   candles.forEach((bar, index) => {
@@ -214,7 +212,7 @@ function drawCandles(candles) {
     ctx.stroke();
     const top = y(Math.max(bar.open, bar.close));
     const bottom = y(Math.min(bar.open, bar.close));
-    ctx.fillRect(x - Math.max(1, slot * 0.3), top, Math.max(2, slot * 0.6), Math.max(1, bottom - top));
+    ctx.fillRect(x - Math.max(1, slot * 0.28), top, Math.max(2, slot * 0.56), Math.max(1, bottom - top));
   });
 }
 
@@ -224,120 +222,153 @@ async function loadCandles() {
   const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
   const payload = await response.json();
   drawCandles(payload.candles || []);
-  note.textContent = payload.error || `${payload.symbol} ${payload.timeframe} · ${ (payload.candles || []).length } bars from the market-data feed`;
+  note.textContent = payload.error || `${payload.symbol} ${payload.timeframe} · ${(payload.candles || []).length} bars from the market-data feed`;
+}
+
+function selectedScan() {
+  return state.scans.find((scan) => scan.symbol === state.symbol) || state.scans[0] || null;
+}
+
+function renderSwitchers(portfolio) {
+  const symbols = portfolio.instruments || [];
+  if (!state.symbol && symbols.length) state.symbol = symbols[0];
+  document.getElementById("symbols").innerHTML = symbols.map((symbol) =>
+    `<button class="symbol-btn ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`
+  ).join("");
+  document.querySelectorAll("[data-symbol]").forEach((button) => {
+    button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
+  });
+  const frames = portfolio.timeframes || [];
+  if (!state.timeframe && frames.length) state.timeframe = frames[0];
+  document.getElementById("timeframes").innerHTML = frames.map((frame) =>
+    `<button class="tf-btn ${frame === state.timeframe ? "active" : ""}" type="button" data-tf="${frame}">${frame}</button>`
+  ).join("");
+  document.querySelectorAll("[data-tf]").forEach((button) => {
+    button.onclick = () => { state.timeframe = button.dataset.tf; loadCandles(); paintSwitchers(); };
+  });
+}
+function paintSwitchers() {
+  document.querySelectorAll("[data-symbol]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.symbol === state.symbol);
+  });
+  document.querySelectorAll("[data-tf]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tf === state.timeframe);
+  });
 }
 
 function renderPortfolio(portfolio) {
   document.getElementById("mode-badge").textContent = portfolio.mode || "PAPER";
-  const book = document.getElementById("portfolio");
-  const halt = portfolio.halted ? `<p class="error">${portfolio.halt_reason}</p>` : `<p class="muted">Daily-loss halt: clear</p>`;
-  const positions = (portfolio.positions || []).map((position) => `
+  const halt = portfolio.halted
+    ? `<p class="error">${portfolio.halt_reason}</p>`
+    : `<p class="muted">Daily-loss halt: clear</p>`;
+  document.getElementById("portfolio").innerHTML = `
+    <div>Cash ${money(portfolio.cash)}</div>
+    <div>Equity ${money(portfolio.equity)}</div>
+    <div>Today's P&amp;L ${money(portfolio.daily_pnl)}</div>
+    <div class="muted">Hard stop auto-exit: ${portfolio.hard_stop ? "on" : "off"}</div>
+    ${halt}`;
+  const positions = portfolio.positions || [];
+  document.getElementById("positions").innerHTML = positions.length ? positions.map((position) => `
     <div class="card">
       <strong>${position.symbol}</strong>
       <div>Qty ${position.quantity} · avg ${money(position.average_price)} · last ${money(position.last_price)}</div>
       <div class="muted">Stop ${money(position.stop_loss)} · target ${money(position.profit_target)}</div>
       <button class="sell" type="button" data-sell="${position.symbol}">Sell</button>
-    </div>`).join("") || `<p class="muted">No open paper positions.</p>`;
-  book.innerHTML = `
-    <div>Cash ${money(portfolio.cash)}</div>
-    <div>Equity ${money(portfolio.equity)}</div>
-    <div>Today's P&L ${money(portfolio.daily_pnl)}</div>
-    <div class="muted">Hard stop auto-exit: ${portfolio.hard_stop ? "on" : "off"}</div>
-    ${halt}
-    ${positions}`;
-  book.querySelectorAll("[data-sell]").forEach((button) => {
-    button.addEventListener("click", () => askSell(button.dataset.sell));
+    </div>`).join("") : `<p class="muted">No open paper positions.</p>`;
+  document.querySelectorAll("[data-sell]").forEach((button) => {
+    button.onclick = () => askSell(button.dataset.sell);
   });
-  const fills = document.getElementById("fills");
-  if (!portfolio.recent_fills || !portfolio.recent_fills.length) {
-    fills.innerHTML = `<p class="muted">No fills in the ledger.</p>`;
-    return;
-  }
-  fills.innerHTML = `<table><tbody>${portfolio.recent_fills.map((fill) =>
-    `<tr><td>${fill.timestamp}</td><td>${fill.symbol}</td><td>${fill.side}</td><td>${fill.quantity}</td><td>${money(fill.price)}</td></tr>`
-  ).join("")}</tbody></table>`;
+  const fills = portfolio.recent_fills || [];
+  document.getElementById("fills").innerHTML = fills.length
+    ? `<table><tbody>${fills.map((fill) => `<tr><td>${fill.timestamp}</td><td>${fill.symbol}</td><td>${fill.side}</td><td>${fill.quantity}</td><td>${money(fill.price)}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">No fills in the ledger.</p>`;
 }
 
-function renderWatchlist(portfolio) {
+function renderWatchlist() {
   const host = document.getElementById("watchlist");
-  const symbols = portfolio.instruments || [];
-  if (!state.symbol && symbols.length) state.symbol = symbols[0];
-  host.innerHTML = symbols.map((symbol) =>
-    `<button class="symbol-btn ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`
-  ).join(" ");
+  if (!state.scans.length) {
+    host.innerHTML = `<p class="muted">No symbols configured.</p>`;
+    return;
+  }
+  host.innerHTML = state.scans.map((scan) => `
+    <div class="quote">
+      <button class="symbol-btn ${scan.symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${scan.symbol}">${scan.symbol}</button>
+      <span class="decision ${scan.decision}">${text(scan.decision)}</span>
+      <div class="muted">Last scan price ${money(scan.price)}</div>
+    </div>`).join("");
   host.querySelectorAll("[data-symbol]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.symbol = button.dataset.symbol;
-      renderWatchlist(portfolio);
-      loadCandles();
-    });
-  });
-  const tfHost = document.getElementById("timeframes");
-  const frames = portfolio.timeframes || [];
-  if (!state.timeframe && frames.length) state.timeframe = frames[0];
-  tfHost.innerHTML = frames.map((frame) =>
-    `<button class="tf-btn ${frame === state.timeframe ? "active" : ""}" type="button" data-tf="${frame}">${frame}</button>`
-  ).join("");
-  tfHost.querySelectorAll("[data-tf]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.timeframe = button.dataset.tf;
-      renderWatchlist(portfolio);
-      loadCandles();
-    });
+    button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); renderWatchlist(); };
   });
 }
 
-function renderCandidates(candidates, explanation) {
+function renderDetail() {
+  const scan = selectedScan();
+  const signals = document.getElementById("signals");
+  const news = document.getElementById("news");
+  const model = document.getElementById("model");
+  if (!scan) return;
+  const frames = Object.entries(scan.timeframes || {});
+  signals.innerHTML = `<h2>SIGNALS · ${scan.symbol}</h2>` + (frames.length ? `<table><tbody>${frames.map(([name, frame]) => `
+    <tr><td>${name}</td><td class="decision ${frame.signal}">${text(frame.signal)}</td><td>${text(frame.trend)}</td></tr>
+    <tr><td></td><td colspan="2" class="muted">RSI ${text(frame.rsi)} · MACD ${text(frame.macd)} · breakout ${text(frame.breakout)} · VWAP ${text(frame.vwap)} · score ${text(frame.bullish_score)}/${text(frame.bearish_score)}</td></tr>
+  `).join("")}</tbody></table><p class="muted">${text(scan.reason)} · scanned ${text(scan.scanned_at)}</p>` : `<p class="muted">${text(scan.reason)}</p>`);
+  const headlines = (scan.news && scan.news.headlines) || [];
+  news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>Status ${text(scan.news && scan.news.status)}</p><p class="muted">${text(scan.news && scan.news.source)}</p>` +
+    (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : `<p class="muted">No headlines returned for this symbol.</p>`);
+  const probability = scan.model && scan.model.probability_up;
+  model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2>
+    <p>Status ${text(scan.model && scan.model.status)}</p>
+    <p>Signal ${text(scan.model && scan.model.signal)}</p>
+    <p>Probability up ${probability === null || probability === undefined ? "—" : Number(probability).toFixed(4)}</p>
+    <p class="muted">${text(scan.model && (scan.model.reason || scan.model.version))}</p>`;
+}
+
+function renderIdeas(explanation) {
   document.getElementById("candidate-note").textContent = explanation || "";
+  const ranked = state.scans.slice().sort((a, b) => Number(b.buyable) - Number(a.buyable));
+  const shown = ranked.slice(0, 3);
   const host = document.getElementById("candidates");
-  if (!candidates.length) {
-    host.innerHTML = `<p class="muted">No BUY recommendations right now.</p>`;
-    return;
-  }
-  host.innerHTML = candidates.map((item) => `
+  const extra = state.scans.length > 3 ? `<p class="muted">Showing 3 of ${state.scans.length} configured symbols.</p>` : "";
+  host.innerHTML = extra + shown.map((scan) => `
     <div class="card">
-      <strong>${item.symbol}</strong>
-      <div>Entry ${money(item.entry)} · stop ${money(item.stop)} · target ${money(item.target)}</div>
-      <div>Risk size ${item.quantity} · confidence ${item.confidence === null ? "—" : item.confidence}</div>
-      <div class="muted">${(item.reasons || []).join(" · ")}</div>
-      ${item.buyable ? `<button class="buy" type="button" data-buy="${item.symbol}">Buy</button>` : `<p class="error">Risk limits permit no shares.</p>`}
+      <strong>${scan.symbol}</strong> <span class="decision ${scan.decision}">${text(scan.decision)}</span>
+      <div class="muted">${text(scan.reason)}</div>
+      ${scan.entry === null ? "" : `<div>Entry ${money(scan.entry)} · stop ${money(scan.stop)} · target ${money(scan.target)}</div><div>Risk size ${text(scan.quantity)}</div>`}
+      <div class="muted">News ${text(scan.news && scan.news.status)} · model ${text(scan.model && scan.model.status)}${scan.model && scan.model.probability_up !== null && scan.model.probability_up !== undefined ? " · p(up) " + Number(scan.model.probability_up).toFixed(4) : ""}</div>
+      ${scan.buyable ? `<button class="buy" type="button" data-buy="${scan.symbol}">Buy</button>` : ""}
     </div>`).join("");
-  host.querySelectorAll("[data-buy]").forEach((button) => {
-    button.addEventListener("click", () => askBuy(button.dataset.buy));
-  });
+  host.querySelectorAll("[data-buy]").forEach((button) => { button.onclick = () => askBuy(button.dataset.buy); });
 }
 
 function renderAlerts(alerts) {
   const host = document.getElementById("alerts");
-  if (!alerts.length) {
-    host.innerHTML = `<p class="muted">No exit alerts.</p>`;
-    return;
-  }
-  host.innerHTML = alerts.map((alert) => `
-    <div class="alert">
-      <strong>Sell recommended · ${alert.symbol}</strong>
-      <div>${alert.reason} · ${alert.message || ""}</div>
-      <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">OK sell</button>
-    </div>`).join("");
+  const body = (!alerts || !alerts.length)
+    ? `<p class="muted">No exit alerts. A stop, target, or opposing signal from the loop appears here for you to OK.</p>`
+    : alerts.map((alert) => `
+      <div class="alert">
+        <strong>Sell recommended · ${alert.symbol}</strong>
+        <div>${text(alert.reason)} · ${text(alert.message)}</div>
+        <div class="muted">Observed ${money(alert.price)} · stop ${money(alert.stop_loss)} · target ${money(alert.profit_target)}</div>
+        <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">OK sell</button>
+      </div>`).join("");
+  host.innerHTML = `<h2>SELL RECOMMENDED</h2>${body}`;
   host.querySelectorAll("[data-alert]").forEach((button) => {
-    button.addEventListener("click", () => askAlert(button.dataset.alert, button.dataset.symbol));
+    button.onclick = () => askAlert(button.dataset.alert, button.dataset.symbol);
   });
 }
 
 async function askBuy(symbol) {
-  const ok = await confirmTrade("CONFIRM PAPER BUY", `Submit a paper buy for ${symbol}? The server will re-check the signal, risk limits, and the daily-loss halt. Live trading stays off.`);
+  const ok = await confirmTrade("CONFIRM PAPER BUY", `Submit a paper buy for ${symbol}? The server re-checks the signal, risk limits, and the daily-loss halt. Live trading stays off.`);
   if (!ok) return;
   try { await post("/api/buy", { symbol }); await refresh(); }
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
-
 async function askSell(symbol) {
   const ok = await confirmTrade("CONFIRM PAPER SELL", `Submit a paper sell for the open ${symbol} position at the latest fresh price? Live trading stays off.`);
   if (!ok) return;
   try { await post("/api/sell", { symbol }); await refresh(); }
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
-
 async function askAlert(alertId, symbol) {
   const ok = await confirmTrade("CONFIRM RECOMMENDED SELL", `OK the recommended paper sell for ${symbol}? This click is the approval.`);
   if (!ok) return;
@@ -345,20 +376,23 @@ async function askAlert(alertId, symbol) {
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
 
+function refreshDetail() { renderDetail(); renderWatchlist(); }
+
 async function refresh() {
   const response = await fetch("/api/state");
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "State request failed");
-  renderWatchlist(payload.portfolio);
+  state.scans = payload.scans || [];
+  renderSwitchers(payload.portfolio);
   renderPortfolio(payload.portfolio);
-  renderCandidates(payload.candidates || [], payload.candidate_explanation || "");
+  renderWatchlist();
+  renderDetail();
+  renderIdeas(payload.candidate_explanation || "");
   renderAlerts(payload.alerts || []);
   await loadCandles();
 }
 
-refresh().catch((error) => {
-  document.getElementById("watchlist").textContent = error.message;
-});
+refresh().catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 setInterval(() => { refresh().catch(() => {}); }, 20000);
 </script>
 </body>

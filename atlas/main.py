@@ -1,3 +1,4 @@
+import os
 import sys
 
 from atlas.config import LIVE_TRADING, SYSTEM_NAME, TRADING_MODE, VERSION
@@ -22,7 +23,7 @@ from config.settings import load_settings
 
 logger = get_logger()
 _USAGE = (
-    "Usage: python main.py [--paper] [--loop] | --dashboard | --status | --status-book\n"
+    "Usage: python main.py [--paper] [--loop] | --dashboard | --train | --status | --status-book\n"
     "Paper session environment variables are listed in README.md."
 )
 
@@ -69,6 +70,23 @@ def main(argv=None):
         return log_status()
     if args == ["--status-book"]:
         return run_book_status()
+    if args == ["--train"]:
+        from atlas.baseline import ensure_baseline_model
+        from atlas.database import AtlasDatabase
+
+        settings = load_settings()
+        database = AtlasDatabase(os.getenv("ATLAS_DATABASE_PATH", "database/atlas.sqlite3"))
+        try:
+            report = ensure_baseline_model(database, settings.instruments)
+        finally:
+            database.close()
+        logger.info(
+            "Baseline model %s; promoted=%s; %s",
+            report.get("status"),
+            report.get("promoted"),
+            report.get("reason"),
+        )
+        return report
     if args == ["--dashboard"]:
         from atlas.dashboard import serve_dashboard
         serve_dashboard()

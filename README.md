@@ -2,7 +2,7 @@
 
 Paper trading only. Live trading is refused: `ATLAS_LIVE_TRADING=true` raises before a session starts, and the broker has no live connection.
 
-Company and macro engines are not on this path. News is an assessment of events you supply. Quant participation is the promoted logistic model already stored in the local database, when one exists. If no model is active, the session still runs on technical agreement plus news.
+Company and macro engines are not on this path. News is Yahoo headlines unless `ATLAS_NEWS_FILE` is set. A promoted logistic model must agree with the technical scan. If no model has passed the walk-forward gates, the technical scan still decides and the panel says why the model was not promoted.
 
 ## Setup
 
@@ -108,7 +108,9 @@ This prints module status and does not fetch bars or submit orders.
 
 ## News
 
-There is no news provider. Omit `ATLAS_NEWS_FILE` and the session records that no events were supplied. To apply events, point the variable at a JSON list:
+Headlines come from Yahoo Finance through `yfinance` for the configured symbols. A fetch error is recorded as `FETCH_FAILED` and does not invent events. Sentiment is counted from a fixed word list in `atlas/news_feed.py`. A headline with none of those words is stored with sentiment 0 and impact 0, which means it was not scored.
+
+`ATLAS_NEWS_FILE` replaces the feed for tests or an offline run:
 
 ```bash
 export ATLAS_NEWS_FILE=news.json
@@ -121,18 +123,31 @@ export ATLAS_NEWS_FILE=news.json
     "title": "Example headline supplied by the operator",
     "category": "EARNINGS",
     "published_at": "2026-11-05T15:00:00+00:00",
-    "sentiment": -0.8,
-    "impact": 0.9,
+    "sentiment": 0,
+    "impact": 0,
     "instruments": ["SPY"]
   }
 ]
 ```
 
-Categories: `EARNINGS`, `FED`, `INFLATION`, `EMPLOYMENT`, `ECONOMIC`, `GEOPOLITICAL`, `OTHER`. Sentiment is from -1 to 1. Impact is from 0 to 1. A strong opposing event withholds the directional recommendation.
+## Baseline model
+
+`python main.py --train` fits the existing logistic model on two years of daily bars for each configured symbol and promotes it only if the walk-forward gates already in the database pass. `ATLAS_AUTO_TRAIN=true` (the default) does that fit on the first paper or dashboard run when no model is active. A short history is `INSUFFICIENT_HISTORY`. A model that fails the gates stays a candidate: its probability can be shown, and it does not create or veto a BUY. A promoted model has to agree with the technical scan before a recommendation is confirmed. The model does not submit orders.
+
+```powershell
+git pull
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python main.py --train
+python main.py --paper --loop
+python main.py --dashboard
+```
+
+Categories for a file override: `EARNINGS`, `FED`, `INFLATION`, `EMPLOYMENT`, `ECONOMIC`, `GEOPOLITICAL`, `OTHER`. A file sentiment below zero with impact at least 0.65 withholds a BUY. The Yahoo feed only reaches that veto when the word list actually matches.
 
 ## Quant model
 
-Train and promote a model separately with `atlas.adaptive.train_candidate` and `AtlasDatabase.promote_model`. When `active_model()` returns a version, the paper pass requires that prediction to match the technical `BUY` or `SELL`. A probability at or above the model threshold (default 0.55) is `BUY`. A probability at or below `1 - threshold` is `SELL`. Values in between are `WAIT` and block the order. No active model means the technical decision is not waiting on a prediction.
+`python main.py --train` is the baseline fit. When `active_model()` returns a version, the paper pass requires that prediction to match the technical `BUY` or `SELL`. A probability at or above the model threshold (default 0.55) is `BUY`. A probability at or below `1 - threshold` is `SELL`. Values in between are `WAIT` and block a directional technical signal. The model never submits an order by itself.
 
 ## Approval
 

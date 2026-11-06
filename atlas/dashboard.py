@@ -13,13 +13,14 @@ from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
 from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
+from atlas.baseline import auto_train_enabled, ensure_baseline_model
+from atlas.news_feed import resolve_news
 from atlas.session import (
     _exit_signal,
     _latest_quote,
     _quote_is_stale,
     fetch_session_histories,
     hard_stop_enabled,
-    load_news_events,
     resolve_timeframes,
 )
 from atlas.pipeline import run_paper_pipeline
@@ -56,7 +57,14 @@ class PaperDashboard:
                 os.getenv("ATLAS_DATABASE_PATH", "database/atlas.sqlite3")
             )
         self.histories_by_symbol = histories_by_symbol
-        self.news_events = [] if news_events is None else news_events
+        self._news_explicit = news_events is not None
+        self.news_events = list(news_events or [])
+        self.news_report = (
+            {"status": "OVERRIDE", "error": None, "source": "caller"}
+            if self._news_explicit
+            else None
+        )
+        self._trained = False
         self.candle_loader = candle_loader
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
@@ -85,7 +93,15 @@ class PaperDashboard:
             raise PermissionError("Live trading is disabled.")
         return broker
 
+    def _prepare(self):
+        if not self._news_explicit:
+            self.news_events, self.news_report = resolve_news(self.settings.instruments)
+        if not self._trained and auto_train_enabled():
+            ensure_baseline_model(self.database, self.settings.instruments)
+            self._trained = True
+
     def _preview(self, symbol, broker, histories):
+        self._prepare()
         return run_paper_pipeline(
             symbol,
             histories,
@@ -94,6 +110,7 @@ class PaperDashboard:
             approved=False,
             database=self.database,
             news_events=self.news_events,
+            news_report=self.news_report,
             execute=False,
             max_data_age_seconds=self.settings.max_market_data_age_seconds,
         )
@@ -168,41 +185,38 @@ class PaperDashboard:
         return rows
 
     def candidates(self):
+        self._prepare()
         broker = self._broker()
         qualified = []
         skipped = []
+        scans = []
         for symbol in self.settings.instruments:
             histories = self._histories(symbol)
             if not histories:
+                scans.append(_empty_scan(symbol, "No market bars returned."))
                 skipped.append(f"{symbol} has no market bars.")
                 continue
             try:
                 preview = self._preview(symbol, broker, histories)
             except Exception as error:
+                scans.append(_empty_scan(symbol, str(error)))
                 skipped.append(f"{symbol} could not be scored: {error}")
                 continue
+            card = _scan_card(symbol, preview, broker)
+            scans.append(card)
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
                 skipped.append(
-                    f"{symbol} is {preview.get('decision') or preview.get('status') or 'unavailable'}."
+                    f"{card['symbol']} is {card['decision']}. {card['reason']} "
+                    f"News {card['news']['status']}. Model {card['model']['status']}."
                 )
                 continue
-            quantity = calculate_position_size(
-                broker.account_info()["equity"],
-                recommendation["entry_price"],
-                recommendation["stop_loss"],
-                current_exposure=broker.current_exposure(),
-            )
-            qualified.append({
-                "symbol": recommendation["instrument"],
-                "entry": recommendation["entry_price"],
-                "stop": recommendation["stop_loss"],
-                "target": recommendation["profit_target"],
-                "quantity": quantity,
-                "confidence": _buy_confidence(preview),
-                "reasons": _reasons(preview),
-                "buyable": quantity > 0,
-            })
+            if card["buyable"]:
+                qualified.append(card)
+            else:
+                skipped.append(
+                    f"{card['symbol']} is BUY but risk limits permit no shares."
+                )
         qualified.sort(key=lambda item: (-(item["confidence"] or -1), item["symbol"]))
         top = qualified[:3]
         if len(qualified) >= 3:
@@ -216,6 +230,7 @@ class PaperDashboard:
             ).strip()
         return {
             "candidates": top,
+            "scans": scans,
             "qualified_count": len(qualified),
             "explanation": explanation,
         }
@@ -350,6 +365,99 @@ class PaperDashboard:
         return self.sell(token, alert["symbol"], alert_id=alert["id"])
 
 
+def _empty_scan(symbol, reason):
+    return {
+        "symbol": str(symbol).strip().upper(),
+        "decision": "NO_DATA",
+        "reason": reason,
+        "price": None,
+        "entry": None,
+        "stop": None,
+        "target": None,
+        "quantity": None,
+        "confidence": None,
+        "reasons": [reason],
+        "buyable": False,
+        "agreement": None,
+        "scanned_at": None,
+        "timeframes": {},
+        "news": {"status": None, "headlines": [], "source": None},
+        "model": {
+            "status": None,
+            "reason": None,
+            "version": None,
+            "probability_up": None,
+            "signal": None,
+        },
+    }
+
+
+def _scan_card(symbol, preview, broker):
+    analysis = preview.get("analysis") or {}
+    recommendation = preview.get("recommendation")
+    decision = preview.get("decision") or analysis.get("status") or "unavailable"
+    quantity = None
+    entry = stop = target = None
+    if recommendation and decision == "BUY":
+        entry = recommendation.get("entry_price")
+        stop = recommendation.get("stop_loss")
+        target = recommendation.get("profit_target")
+        if isinstance(entry, (int, float)) and isinstance(stop, (int, float)):
+            quantity = calculate_position_size(
+                broker.account_info()["equity"],
+                entry,
+                stop,
+                current_exposure=broker.current_exposure(),
+            )
+    news = preview.get("news") or {}
+    adaptive = preview.get("adaptive") or {}
+    prediction = adaptive.get("prediction") or {}
+    timeframes = {}
+    for name, frame in (analysis.get("timeframes") or {}).items():
+        strategy = (frame or {}).get("strategy") or {}
+        observations = strategy.get("observations") or {}
+        timeframes[name] = {
+            "signal": strategy.get("signal"),
+            "status": strategy.get("status"),
+            "confidence": strategy.get("confidence"),
+            "trend": observations.get("trend"),
+            "rsi": observations.get("rsi"),
+            "macd": observations.get("macd"),
+            "breakout": observations.get("breakout"),
+            "vwap": observations.get("vwap"),
+            "bullish_score": observations.get("bullish_score"),
+            "bearish_score": observations.get("bearish_score"),
+        }
+    return {
+        "symbol": (recommendation or {}).get("instrument") or str(symbol).strip().upper(),
+        "decision": decision,
+        "reason": analysis.get("reason") or "",
+        "price": analysis.get("price"),
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "quantity": quantity,
+        "confidence": _buy_confidence(preview),
+        "reasons": _reasons(preview),
+        "buyable": decision == "BUY" and isinstance(quantity, int) and quantity > 0,
+        "agreement": analysis.get("agreement"),
+        "scanned_at": preview.get("scanned_at"),
+        "timeframes": timeframes,
+        "news": {
+            "status": news.get("status"),
+            "headlines": list(news.get("headlines") or []),
+            "source": news.get("source"),
+        },
+        "model": {
+            "status": adaptive.get("status"),
+            "reason": adaptive.get("reason"),
+            "version": adaptive.get("version"),
+            "probability_up": prediction.get("probability_up"),
+            "signal": prediction.get("signal"),
+        },
+    }
+
+
 def _buy_confidence(preview):
     scores = []
     for frame in ((preview.get("analysis") or {}).get("timeframes") or {}).values():
@@ -370,6 +478,15 @@ def _reasons(preview):
     reasons.append(f"Technical decision: {preview.get('decision')}")
     news = preview.get("news") or {}
     reasons.append(f"News: {news.get('status', 'not assessed')}")
+    headlines = news.get("headlines") or []
+    if headlines:
+        reasons.append("Headlines: " + " | ".join(str(item) for item in headlines[:3]))
+    prediction = (preview.get("adaptive") or {}).get("prediction") or {}
+    if isinstance(prediction.get("probability_up"), (int, float)):
+        reasons.append(
+            f"Model probability up {float(prediction['probability_up']):.4f} "
+            f"signal {prediction.get('signal')}"
+        )
     adaptive = preview.get("adaptive") or {}
     model = adaptive.get("status", "not assessed")
     if adaptive.get("version"):
@@ -407,6 +524,7 @@ def _state_payload(service):
     return {
         "portfolio": portfolio,
         "candidates": ranked["candidates"],
+        "scans": ranked.get("scans") or [],
         "candidate_explanation": ranked["explanation"],
         "qualified_count": ranked["qualified_count"],
         "alerts": service.alerts(),

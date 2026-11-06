@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 import os
 
 from atlas.adaptive import latest_model_probability
@@ -160,13 +161,56 @@ def _remote_approval_required(explicit):
     raise ValueError("ATLAS_REQUIRE_REMOTE_APPROVAL must be a boolean value.")
 
 
+def _unpromoted_baseline(database, histories):
+    """Show a stored candidate that did not pass promotion. It does not change the signal."""
+    if database is None or not hasattr(database, "get_metadata"):
+        return None
+    raw_report = database.get_metadata("baseline_report")
+    version = database.get_metadata("baseline_candidate")
+    if not version:
+        if not raw_report:
+            return None
+        try:
+            report = json.loads(raw_report)
+        except json.JSONDecodeError:
+            return None
+        if report.get("status") == "INSUFFICIENT_HISTORY":
+            return {
+                "status": "INSUFFICIENT_HISTORY",
+                "prediction": None,
+                "reason": report.get("reason"),
+            }
+        return None
+    candidate = database.get_model_version(version)
+    if candidate is None or candidate.get("status") == "active":
+        return None
+    try:
+        prediction = latest_model_probability(
+            _decision_history(histories),
+            candidate["model"],
+        )
+    except ValueError as error:
+        return {
+            "status": "DATA_UNAVAILABLE",
+            "version": version,
+            "prediction": None,
+            "reason": str(error),
+        }
+    return {
+        "status": "CANDIDATE_NOT_PROMOTED",
+        "version": version,
+        "prediction": prediction,
+        "reason": database.get_metadata("baseline_reason"),
+    }
+
+
 def _decision_history(histories):
     if "1d" in histories:
         return histories["1d"]
     return max(histories.values(), key=len)
 
 
-def _apply_model_and_news(scanned, histories, symbol, database, news_events):
+def _apply_model_and_news(scanned, histories, symbol, database, news_events, news_report=None):
     """Confirm a technical decision with the active model and news, if present.
 
     A missing model does not block the decision. An active model can confirm
@@ -185,7 +229,10 @@ def _apply_model_and_news(scanned, histories, symbol, database, news_events):
     if recommendation is not None:
         decision["market_timestamp"] = recommendation.get("market_timestamp")
 
-    adaptive = {"status": "NO_ACTIVE_MODEL", "prediction": None}
+    adaptive = _unpromoted_baseline(database, histories) or {
+        "status": "NO_ACTIVE_MODEL",
+        "prediction": None,
+    }
     active = database.active_model() if database is not None else None
     if active is not None:
         try:
@@ -224,6 +271,12 @@ def _apply_model_and_news(scanned, histories, symbol, database, news_events):
                 ).strip()
 
     impact = assess_news_impact(list(news_events or []), symbol)
+    if news_report and news_report.get("status") == "FETCH_FAILED" and impact["event_count"] == 0:
+        impact["status"] = "FETCH_FAILED"
+        impact["source"] = f"news fetch failed: {news_report.get('error')}"
+        impact["headlines"] = []
+    elif news_report and news_report.get("source"):
+        impact["source"] = news_report["source"]
     decision = apply_news_context(decision, impact)
     if decision.get("signal") not in {"BUY", "SELL"}:
         recommendation = None
@@ -248,6 +301,7 @@ def run_paper_pipeline(
     require_remote_approval=None,
     database=None,
     news_events=None,
+    news_report=None,
     execute=True,
 ):
     """Scan, then send one recommendation through risk, approval, and the paper broker.
@@ -275,6 +329,7 @@ def run_paper_pipeline(
         symbol,
         database,
         news_events,
+        news_report=news_report,
     )
     result = {
         "symbol": scanned["symbol"],
