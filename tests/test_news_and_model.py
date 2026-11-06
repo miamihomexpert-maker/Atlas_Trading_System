@@ -234,6 +234,13 @@ def test_dashboard_buy_list_stays_empty_when_nothing_qualifies(tmp_path):
     assert ranked["qualified_count"] == 0
     assert "XYZ" in ranked["explanation"]
     assert "ABC" in ranked["explanation"]
+    by_symbol = {card["symbol"]: card for card in ranked["scans"]}
+    assert set(by_symbol) == {"XYZ", "ABC"}
+    assert by_symbol["XYZ"]["buyable"] is False
+    assert by_symbol["ABC"]["buyable"] is False
+    assert by_symbol["XYZ"]["reason"]
+    assert by_symbol["XYZ"]["timeframes"]
+    assert by_symbol["XYZ"]["entry"] is None
     database.close()
 
 
@@ -264,6 +271,13 @@ def test_dashboard_shows_a_confirmed_buy_without_padding(tmp_path):
     ranked = service.candidates()
     assert [item["symbol"] for item in ranked["candidates"]] == ["XYZ"]
     assert ranked["candidates"][0]["quantity"] > 0
-    assert "entry" in ranked["candidates"][0]
+    assert ranked["candidates"][0]["entry"] > ranked["candidates"][0]["stop"]
+    buy = next(card for card in ranked["scans"] if card["symbol"] == "XYZ")
+    assert buy["buyable"] is True
+    assert buy["news"]["headlines"] == ["Unscored headline"]
+    missing = {card["symbol"]: card for card in ranked["scans"]}
+    assert missing["ABC"]["decision"] == "NO_DATA"
+    assert missing["DEF"]["decision"] == "NO_DATA"
+    assert missing["ABC"]["buyable"] is False
     assert "ABC" in ranked["explanation"] or "DEF" in ranked["explanation"]
     database.close()
