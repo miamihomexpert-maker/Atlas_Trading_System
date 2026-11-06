@@ -61,6 +61,10 @@
   .symbol-btn.active, .tf-btn.active { border-color: #7ad7ff; box-shadow: inset 0 0 10px var(--glow); }
   .muted { color: var(--muted); }
   .card, .quote { border-top: 1px solid rgba(122, 215, 255, 0.18); padding: 8px 0; }
+  .card { cursor: pointer; padding: 10px; margin-bottom: 8px; border: 1px solid transparent; }
+  .card.selected { border-color: #7ad7ff; box-shadow: inset 0 0 12px var(--glow); }
+  button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .actions { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
   .decision { font-weight: 700; letter-spacing: 0.08em; }
   .decision.BUY { color: var(--up); }
   .decision.SELL { color: var(--down); }
@@ -127,6 +131,10 @@
     <h2>TOP 3 BUY CANDIDATES</h2>
     <p id="candidate-note" class="muted"></p>
     <div id="candidates"></div>
+    <div class="actions" id="trade-actions">
+      <div class="label">NEXT STEP</div>
+      <p class="muted">Select a symbol, then buy or sell.</p>
+    </div>
   </section>
 </div>
 <div class="modal" id="modal">
@@ -301,43 +309,84 @@ function renderWatchlist() {
   });
 }
 
+function selectSymbol(symbol) {
+  state.symbol = symbol;
+  renderWatchlist();
+  renderIdeas(state.explanation || "");
+  renderActions();
+  renderDetail();
+  loadCandles();
+  paintSwitchers();
+}
+
 function renderDetail() {
   const scan = selectedScan();
   const signals = document.getElementById("signals");
   const news = document.getElementById("news");
   const model = document.getElementById("model");
   if (!scan) return;
-  const frames = Object.entries(scan.timeframes || {});
-  signals.innerHTML = `<h2>SIGNALS · ${scan.symbol}</h2>` + (frames.length ? `<table><tbody>${frames.map(([name, frame]) => `
-    <tr><td>${name}</td><td class="decision ${frame.signal}">${text(frame.signal)}</td><td>${text(frame.trend)}</td></tr>
-    <tr><td></td><td colspan="2" class="muted">RSI ${text(frame.rsi)} · MACD ${text(frame.macd)} · breakout ${text(frame.breakout)} · VWAP ${text(frame.vwap)} · score ${text(frame.bullish_score)}/${text(frame.bearish_score)}</td></tr>
-  `).join("")}</tbody></table><p class="muted">${text(scan.reason)} · scanned ${text(scan.scanned_at)}</p>` : `<p class="muted">${text(scan.reason)}</p>`);
+  const copy = scan.copy || {};
+  const frames = copy.timeframes && copy.timeframes.length
+    ? copy.timeframes.map((line) => `<p>${line}</p>`).join("")
+    : `<p class="muted">${text(copy.why || scan.reason)}</p>`;
+  signals.innerHTML = `<h2>SIGNALS · ${scan.symbol}</h2>${frames}<p class="muted">Scanned ${text(scan.scanned_at)}</p>`;
   const headlines = (scan.news && scan.news.headlines) || [];
-  news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>Status ${text(scan.news && scan.news.status)}</p><p class="muted">${text(scan.news && scan.news.source)}</p>` +
-    (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : `<p class="muted">No headlines returned for this symbol.</p>`);
-  const probability = scan.model && scan.model.probability_up;
-  model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2>
-    <p>Status ${text(scan.model && scan.model.status)}</p>
-    <p>Signal ${text(scan.model && scan.model.signal)}</p>
-    <p>Probability up ${probability === null || probability === undefined ? "—" : Number(probability).toFixed(4)}</p>
-    <p class="muted">${text(scan.model && (scan.model.reason || scan.model.version))}</p>`;
+  news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>${text(copy.news)}</p>` +
+    (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : "");
+  model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
 }
 
 function renderIdeas(explanation) {
-  document.getElementById("candidate-note").textContent = explanation || "";
-  const ranked = state.scans.slice().sort((a, b) => Number(b.buyable) - Number(a.buyable));
+  state.explanation = explanation || "";
+  document.getElementById("candidate-note").textContent = state.explanation;
+  const ranked = state.scans.slice().sort((a, b) => Number(b.buyable) - Number(a.buyable) || a.symbol.localeCompare(b.symbol));
   const shown = ranked.slice(0, 3);
   const host = document.getElementById("candidates");
-  const extra = state.scans.length > 3 ? `<p class="muted">Showing 3 of ${state.scans.length} configured symbols.</p>` : "";
-  host.innerHTML = extra + shown.map((scan) => `
-    <div class="card">
-      <strong>${scan.symbol}</strong> <span class="decision ${scan.decision}">${text(scan.decision)}</span>
-      <div class="muted">${text(scan.reason)}</div>
-      ${scan.entry === null ? "" : `<div>Entry ${money(scan.entry)} · stop ${money(scan.stop)} · target ${money(scan.target)}</div><div>Risk size ${text(scan.quantity)}</div>`}
-      <div class="muted">News ${text(scan.news && scan.news.status)} · model ${text(scan.model && scan.model.status)}${scan.model && scan.model.probability_up !== null && scan.model.probability_up !== undefined ? " · p(up) " + Number(scan.model.probability_up).toFixed(4) : ""}</div>
-      ${scan.buyable ? `<button class="buy" type="button" data-buy="${scan.symbol}">Buy</button>` : ""}
-    </div>`).join("");
-  host.querySelectorAll("[data-buy]").forEach((button) => { button.onclick = () => askBuy(button.dataset.buy); });
+  const extra = state.scans.length > 3 ? `<p class="muted">Showing 3 of ${state.scans.length} symbols you configured.</p>` : "";
+  host.innerHTML = extra + shown.map((scan) => {
+    const copy = scan.copy || {};
+    const title = scan.name ? `${scan.symbol} · ${scan.name}` : scan.symbol;
+    const levels = scan.entry === null ? "" : `<div>Entry ${money(scan.entry)}. Stop ${money(scan.stop)}. Target ${money(scan.target)}. Risk size ${text(scan.quantity)} shares.</div>`;
+    return `
+    <div class="card ${scan.symbol === state.symbol ? "selected" : ""}" data-pick="${scan.symbol}">
+      <strong>${title}</strong>
+      <div>Last scan price ${money(scan.price)}</div>
+      <div class="decision ${scan.decision}">${text(copy.decision || scan.decision)}</div>
+      <div>${text(copy.why)}</div>
+      ${(copy.timeframes || []).map((line) => `<div class="muted">${line}</div>`).join("")}
+      <div class="muted">${text(copy.news)}</div>
+      <div class="muted">${text(copy.model)}</div>
+      ${levels}
+    </div>`;
+  }).join("");
+  host.querySelectorAll("[data-pick]").forEach((card) => {
+    card.onclick = () => selectSymbol(card.dataset.pick);
+  });
+}
+
+function renderActions() {
+  const host = document.getElementById("trade-actions");
+  const scan = selectedScan();
+  if (!scan) {
+    host.innerHTML = `<div class="label">NEXT STEP</div><p class="muted">Select a symbol, then buy or sell.</p>`;
+    return;
+  }
+  const copy = scan.copy || {};
+  const open = (state.positions || []).some((position) => position.symbol === scan.symbol && position.quantity > 0);
+  const buyNote = copy.buy_note || copy.why || "Buy is not available.";
+  const sellNote = open ? "Sell is available for the open paper position. You still have to confirm." : "No open paper position.";
+  host.innerHTML = `
+    <div class="label">NEXT STEP · ${scan.symbol}</div>
+    <div class="row">
+      <button class="buy" type="button" id="action-buy" ${scan.buyable ? "" : "disabled"}>Buy</button>
+      <button class="sell" type="button" id="action-sell" ${open ? "" : "disabled"}>Sell</button>
+    </div>
+    <p class="muted">${scan.buyable ? buyNote : buyNote}</p>
+    <p class="muted">${sellNote}</p>`;
+  const buy = document.getElementById("action-buy");
+  const sell = document.getElementById("action-sell");
+  if (scan.buyable) buy.onclick = () => askBuy(scan.symbol);
+  if (open) sell.onclick = () => askSell(scan.symbol);
 }
 
 function renderAlerts(alerts) {
@@ -376,18 +425,20 @@ async function askAlert(alertId, symbol) {
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
 
-function refreshDetail() { renderDetail(); renderWatchlist(); }
+function refreshDetail() { renderDetail(); renderWatchlist(); renderActions(); }
 
 async function refresh() {
   const response = await fetch("/api/state");
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "State request failed");
   state.scans = payload.scans || [];
+  state.positions = (payload.portfolio && payload.portfolio.positions) || [];
   renderSwitchers(payload.portfolio);
   renderPortfolio(payload.portfolio);
   renderWatchlist();
   renderDetail();
   renderIdeas(payload.candidate_explanation || "");
+  renderActions();
   renderAlerts(payload.alerts || []);
   await loadCandles();
 }

@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 import threading
 from http.client import HTTPConnection
@@ -7,7 +8,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from atlas.broker import PaperBroker
-from atlas.dashboard import PaperDashboard, make_server
+from atlas.dashboard import PaperDashboard, describe_scan, make_server
 from atlas.database import AtlasDatabase
 from atlas.risk import calculate_position_size
 from atlas.session import run_paper_session
@@ -207,3 +208,74 @@ def test_manual_loop_recommends_exits_unless_hard_stop_is_on(tmp_path):
     assert broker.positions() == {}
     assert any(event["action"] == "HARD_STOP_EXECUTED" for event in database.list_audit_events())
     database.close()
+
+
+def test_wait_card_explains_why_buy_stays_disabled(tmp_path):
+    histories = {
+        "XYZ": {"1h": recent_history(100, 1), "1d": recent_history(140, -1)},
+        "ABC": _bars(140, -1),
+    }
+    service, database = _service(tmp_path, histories, symbols=("XYZ", "ABC"))
+    service.name_loader = lambda symbol: "Example Fund" if symbol == "XYZ" else symbol
+    ranked = service.candidates()
+    cards = {card["symbol"]: card for card in ranked["scans"]}
+
+    assert list(cards) == ["XYZ", "ABC"]
+    assert len(ranked["candidates"]) <= 2
+    waiting = cards["XYZ"]
+    assert waiting["buyable"] is False
+    assert waiting["copy"]["buy_enabled"] is False
+    assert "wait" in waiting["copy"]["decision"].lower() or "not a buy" in waiting["copy"]["buy_note"].lower()
+    assert waiting["copy"]["why"]
+    assert waiting["copy"]["timeframes"]
+    assert waiting["name"] == "Example Fund"
+    assert cards["ABC"]["name"] is None
+    assert "FETCH_FAILED" not in waiting["copy"]["news"]
+
+    with pytest.raises(ValueError, match="not a current BUY"):
+        service.buy(service.token, "XYZ")
+    assert service._broker().positions() == {}
+    database.close()
+
+
+def test_plain_language_does_not_invent_a_probability_or_headlines():
+    copy = describe_scan({
+        "decision": "WAIT",
+        "reason": "Insufficient timeframe agreement.",
+        "buyable": False,
+        "timeframes": {
+            "1h": {"signal": "WAIT", "trend": "BEARISH", "bullish_score": 2, "bearish_score": 3},
+            "1d": {"signal": "SELL", "trend": "BEARISH", "bullish_score": 0, "bearish_score": 4},
+        },
+        "news": {"status": "FETCH_FAILED", "headlines": []},
+        "model": {
+            "status": "CANDIDATE_NOT_PROMOTED",
+            "probability_up": 0.5442,
+            "signal": "WAIT",
+        },
+    })
+    assert "timeframes do not agree" in copy["why"]
+    assert "The news feed did not return headlines." == copy["news"]
+    assert "did not pass the checks" in copy["model"]
+    assert "54%" in copy["model"]
+    assert copy["buy_enabled"] is False
+
+    quiet = describe_scan({
+        "decision": "WAIT",
+        "reason": "Insufficient timeframe agreement.",
+        "buyable": False,
+        "timeframes": {},
+        "news": {"status": "FETCH_FAILED", "headlines": []},
+        "model": {"status": "CANDIDATE_NOT_PROMOTED", "probability_up": None, "signal": "WAIT"},
+    })
+    assert "chance" not in quiet["model"]
+
+
+def test_trade_buttons_are_always_in_the_page_template():
+    page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
+    assert 'id="action-buy"' in page
+    assert 'id="action-sell"' in page
+    assert 'id="trade-actions"' in page
+    assert "data-pick=" in page
+    assert "No open paper position." in page
+    assert "${scan.buyable ? `<button" not in page
