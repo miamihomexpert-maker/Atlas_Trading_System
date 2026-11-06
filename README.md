@@ -2,7 +2,7 @@
 
 Paper trading only. Live trading is refused: `ATLAS_LIVE_TRADING=true` raises before a session starts, and the broker has no live connection.
 
-Company and macro engines are not on this path. News is Yahoo headlines unless `ATLAS_NEWS_FILE` is set. A promoted logistic model must agree with the technical scan. If no model has passed the walk-forward gates, the technical scan still decides and the panel says why the model was not promoted.
+News is Yahoo headlines unless `ATLAS_NEWS_FILE` is set. Company facts come from Yahoo for the configured symbols and are display-only: a fund shows its stated objective and asset allocation when the feed returns them, and an operating company shows statement rows only when those rows are present. Neither news, an unpromoted model, nor company facts can turn a technical wait into a buy. The macro engine is not on this path. A promoted logistic model must agree with the technical scan. If no model has passed the walk-forward gates, the technical scan still decides and the panel says why the model was not promoted.
 
 ## Setup
 
@@ -105,6 +105,10 @@ python main.py --status
 ```
 
 This prints module status and does not fetch bars or submit orders.
+
+## Company facts
+
+The company panel reads Yahoo Finance through `yfinance` for each configured symbol. SPY and QQQ are funds, so the panel shows the stated investment objective, top holdings, sector weights, and asset-class weights when that fund profile returns them. It does not invent capital expenditure, buybacks, dividends, research, acquisitions, or guidance for a fund. If a later symbol is an operating company (`quoteType` EQUITY), the panel adds the latest cash-flow or income-statement amount only for a row the statement actually contained. A failed or empty feed stays blank and says why. `ATLAS_COMPANY_FACTS=false` skips the fetch. These facts are not an input to the buy or sell decision.
 
 ## News
 

@@ -14,6 +14,7 @@ from atlas.broker import get_broker_status
 from atlas.alerts import get_alerts_status
 from atlas.telegram import get_telegram_status
 from atlas.database import get_database_status
+from atlas.company import get_company_status
 from atlas.news import get_news_status
 from atlas.adaptive import get_adaptive_status
 from atlas.envfile import load_dotenv
@@ -47,6 +48,7 @@ def log_status():
     logger.info(get_telegram_status())
     logger.info(get_database_status())
     logger.info(get_news_status())
+    logger.info(get_company_status())
     logger.info("System status: INITIALIZED; live trading disabled")
     return {"mode": "status", "live_trading": False}
 

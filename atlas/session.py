@@ -104,6 +104,7 @@ def run_paper_session(
     minimum_agreement=None,
     manual_exits=False,
     hard_stop=None,
+    company_loader=None,
 ):
     """Run one paper pass over the configured watchlist.
 
@@ -161,6 +162,7 @@ def run_paper_session(
                 require_remote_approval,
                 manual_exits=manual_exits,
                 hard_stop=hard_stop_enabled(hard_stop),
+                company_loader=company_loader,
             )
         )
         _notify_cycle(results)
@@ -466,6 +468,7 @@ def _collect_cycle_results(
     require_remote_approval,
     manual_exits=False,
     hard_stop=False,
+    company_loader=None,
 ):
     symbols = list(settings.instruments)
     for symbol in broker.positions():
@@ -517,7 +520,30 @@ def _collect_cycle_results(
                 hard_stop=hard_stop,
             )
         )
+    _attach_company_facts(results, settings.instruments, company_loader)
     return results
+
+
+def _attach_company_facts(results, instruments, company_loader):
+    """Attach a display-only profile. It is not an input to the decision."""
+    from atlas.company import profile_for_symbol, resolve_company_loader
+
+    loader = resolve_company_loader(company_loader)
+    configured = {str(symbol).strip().upper() for symbol in instruments}
+    cache = {}
+    for result in results:
+        symbol = str(result.get("symbol") or "").strip().upper()
+        if symbol not in configured:
+            continue
+        if symbol not in cache:
+            cache[symbol] = profile_for_symbol(symbol, loader)
+            logger.info(
+                "%s company=%s source=%s",
+                symbol,
+                cache[symbol].get("status"),
+                cache[symbol].get("source"),
+            )
+        result["company"] = cache[symbol]
 
 
 def _histories_for(symbol, timeframes, histories_by_symbol):

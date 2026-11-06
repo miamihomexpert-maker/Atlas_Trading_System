@@ -14,6 +14,7 @@ from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
 from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
 from atlas.baseline import auto_train_enabled, ensure_baseline_model
+from atlas.company import describe_company, profile_for_symbol, resolve_company_loader
 from atlas.news_feed import resolve_news
 from atlas.session import (
     _exit_signal,
@@ -44,6 +45,7 @@ class PaperDashboard:
         candle_loader=None,
         hard_stop=None,
         name_loader=None,
+        company_loader=None,
     ):
         if not token or not str(token).strip():
             raise ValueError("Dashboard token is required.")
@@ -69,6 +71,8 @@ class PaperDashboard:
         self.candle_loader = candle_loader
         self.name_loader = name_loader
         self._names = {}
+        self.company_loader = resolve_company_loader(company_loader)
+        self._companies = {}
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
 
@@ -112,8 +116,15 @@ class PaperDashboard:
             self._names[symbol] = value
         return self._names[symbol]
 
+    def _company_profile(self, symbol):
+        if symbol not in self._companies:
+            self._companies[symbol] = profile_for_symbol(symbol, self.company_loader)
+        return self._companies[symbol]
+
     def _described(self, card):
         card["name"] = self._instrument_name(card["symbol"])
+        card["company"] = self._company_profile(card["symbol"])
+        card["company_copy"] = describe_company(card["company"])
         card["copy"] = describe_scan(card)
         return card
 
@@ -226,9 +237,7 @@ class PaperDashboard:
                 scans.append(self._described(_empty_scan(symbol, str(error))))
                 skipped.append(f"{symbol} could not be scored: {error}")
                 continue
-            card = _scan_card(symbol, preview, broker)
-            card["name"] = self._instrument_name(card["symbol"])
-            card["copy"] = describe_scan(card)
+            card = self._described(_scan_card(symbol, preview, broker))
             scans.append(card)
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
