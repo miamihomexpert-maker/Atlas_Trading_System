@@ -125,6 +125,7 @@
       <div class="subpanel" id="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
       <div class="subpanel" id="model"><h2>MODEL</h2><p class="muted">Waiting for a stored model.</p></div>
     </div>
+    <div class="panel" id="company"><h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p></div>
     <div class="panel" id="alerts"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
   </section>
   <section class="panel">
@@ -324,7 +325,10 @@ function renderDetail() {
   const signals = document.getElementById("signals");
   const news = document.getElementById("news");
   const model = document.getElementById("model");
-  if (!scan) return;
+  if (!scan) {
+    renderCompany(null);
+    return;
+  }
   const copy = scan.copy || {};
   const frames = copy.timeframes && copy.timeframes.length
     ? copy.timeframes.map((line) => `<p>${line}</p>`).join("")
@@ -334,6 +338,23 @@ function renderDetail() {
   news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>${text(copy.news)}</p>` +
     (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : "");
   model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
+  renderCompany(scan);
+}
+
+function renderCompany(scan) {
+  const host = document.getElementById("company");
+  if (!scan) {
+    host.innerHTML = `<h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p>`;
+    return;
+  }
+  const copy = scan.company_copy || {};
+  const parts = [`<h2>COMPANY · ${scan.symbol}</h2>`];
+  if (copy.summary) parts.push(`<p>${text(copy.summary)}</p>`);
+  if (copy.objective) parts.push(`<p>${text(copy.objective)}</p>`);
+  (copy.lines || []).forEach((line) => parts.push(`<p>${text(line)}</p>`));
+  (copy.missing || []).forEach((line) => parts.push(`<p class="muted">${text(line)}</p>`));
+  parts.push(`<p class="muted">Source: ${text(copy.source)}. Read at ${text(copy.fetched_at)}.</p>`);
+  host.innerHTML = parts.join("");
 }
 
 function renderIdeas(explanation) {
@@ -356,6 +377,7 @@ function renderIdeas(explanation) {
       ${(copy.timeframes || []).map((line) => `<div class="muted">${line}</div>`).join("")}
       <div class="muted">${text(copy.news)}</div>
       <div class="muted">${text(copy.model)}</div>
+      <div class="muted">${text((scan.company_copy || {}).summary)}</div>
       ${levels}
     </div>`;
   }).join("");
