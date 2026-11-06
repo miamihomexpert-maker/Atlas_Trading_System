@@ -1,4 +1,10 @@
-from atlas.market_data import get_intraday_history, get_multi_timeframe_history
+from datetime import datetime, timezone
+
+from atlas.market_data import (
+    freshest_observation,
+    get_intraday_history,
+    get_multi_timeframe_history,
+)
 from atlas.pipeline import run_multi_timeframe_pipeline
 from atlas.signals import signal_from_analysis
 
@@ -73,6 +79,13 @@ def scan_timeframes(symbol, histories, minimum_agreement=2):
             representative = dict(aligned[0])
             representative["signal"] = analysis["signal"]
             signal = signal_from_analysis(symbol, representative)
+    if signal is not None:
+        # Yahoo stamps the bar open. Age the order off the newest bar's
+        # coverage time across timeframes, not the first timeframe's open.
+        observed = freshest_observation(histories, datetime.now(timezone.utc))
+        if observed is not None:
+            signal = dict(signal)
+            signal["market_timestamp"] = observed["as_of"].isoformat()
     return {
         "symbol": str(symbol).strip().upper(),
         "analysis": analysis,

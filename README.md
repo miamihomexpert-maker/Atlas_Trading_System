@@ -58,6 +58,8 @@ python main.py --paper
 
 Bars come from Yahoo Finance through `yfinance`. The `1h` request uses a `1mo` period and the `1d` request uses `6mo`. Empty responses are reported as no data. This repository does not ship sample prices or performance.
 
+Yahoo labels each bar at its open: a 1h bar is stamped on the half hour (13:30 covers 13:30–14:30) and a 1d bar is stamped at midnight New York time. The stale-data check ages the newest bar by when that bar was current — the fetch time while it is still forming, otherwise its end (16:00 New York for a daily bar) — not the open label. `ATLAS_MAX_MARKET_DATA_AGE_SECONDS` still rejects a bar that has already been closed longer than that limit. A shell value overrides `.env`.
+
 `ATLAS_PAPER_APPROVED=true` is the operator approval for orders in this process. Risk limits still apply on the fill: 1% per trade, 10% exposure, and a 3% daily-loss halt. Omit the variable to score the watchlist without submitting.
 
 The ledger is `database/atlas.sqlite3` unless `ATLAS_DATABASE_PATH` points somewhere else. A later session reloads the paper book, including each open position's stop and target.
