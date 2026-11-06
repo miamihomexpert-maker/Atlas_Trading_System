@@ -22,7 +22,7 @@ from config.settings import load_settings
 
 logger = get_logger()
 _USAGE = (
-    "Usage: python main.py [--paper] [--loop] | --status | --status-book\n"
+    "Usage: python main.py [--paper] [--loop] | --dashboard | --status | --status-book\n"
     "Paper session environment variables are listed in README.md."
 )
 
@@ -69,6 +69,10 @@ def main(argv=None):
         return log_status()
     if args == ["--status-book"]:
         return run_book_status()
+    if args == ["--dashboard"]:
+        from atlas.dashboard import serve_dashboard
+        serve_dashboard()
+        return {"mode": "dashboard", "live_trading": False}
     raise SystemExit(_USAGE)
 
 

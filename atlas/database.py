@@ -20,6 +20,8 @@ class AtlasDatabase:
             check_same_thread=False,
         )
         self._connection.row_factory = sqlite3.Row
+        if self.path != ":memory:":
+            self._connection.execute("PRAGMA journal_mode=WAL")
         self._initialize()
 
     def _initialize(self):
@@ -52,6 +54,24 @@ class AtlasDatabase:
                 CREATE TABLE IF NOT EXISTS atlas_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    symbol TEXT,
+                    detail_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS exit_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    price REAL,
+                    stop_loss REAL,
+                    profit_target REAL,
+                    detail_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS position_plans (
                     symbol TEXT PRIMARY KEY,
@@ -182,6 +202,118 @@ class AtlasDatabase:
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
+
+    def record_audit_event(self, action, symbol, detail):
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO audit_events(timestamp, action, symbol, detail_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    str(action),
+                    None if symbol is None else str(symbol).strip().upper(),
+                    json.dumps(detail or {}, sort_keys=True, default=str),
+                ),
+            )
+        return timestamp
+
+    def list_audit_events(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM audit_events ORDER BY id"
+            ).fetchall()
+        events = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item.pop("detail_json"))
+            events.append(item)
+        return events
+
+    def upsert_exit_alert(self, symbol, reason, price, stop_loss, profit_target, detail):
+        symbol = str(symbol).strip().upper()
+        reason = str(reason).strip().lower()
+        now = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(detail or {}, sort_keys=True, default=str)
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                """
+                SELECT id FROM exit_alerts
+                WHERE symbol = ? AND reason = ? AND status = 'PENDING'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (symbol, reason),
+            ).fetchone()
+            if existing is None:
+                cursor = self._connection.execute(
+                    """
+                    INSERT INTO exit_alerts(
+                        created_at, symbol, reason, status, price,
+                        stop_loss, profit_target, detail_json
+                    ) VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?)
+                    """,
+                    (
+                        now, symbol, reason, price, stop_loss, profit_target, payload,
+                    ),
+                )
+                return int(cursor.lastrowid)
+            self._connection.execute(
+                """
+                UPDATE exit_alerts
+                SET price = ?, stop_loss = ?, profit_target = ?, detail_json = ?
+                WHERE id = ?
+                """,
+                (price, stop_loss, profit_target, payload, existing["id"]),
+            )
+            return int(existing["id"])
+
+    def list_exit_alerts(self, status="PENDING"):
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM exit_alerts
+                WHERE status = ?
+                ORDER BY id
+                """,
+                (status,),
+            ).fetchall()
+        alerts = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item.pop("detail_json"))
+            alerts.append(item)
+        return alerts
+
+    def get_exit_alert(self, alert_id):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM exit_alerts WHERE id = ?",
+                (int(alert_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["detail"] = json.loads(item.pop("detail_json"))
+        return item
+
+    def set_exit_alert_status(self, alert_id, status):
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE exit_alerts SET status = ? WHERE id = ?",
+                (str(status), int(alert_id)),
+            )
+
+    def supersede_exit_alerts(self, symbol, reason):
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE exit_alerts SET status = 'SUPERSEDED'
+                WHERE symbol = ? AND reason = ? AND status = 'PENDING'
+                """,
+                (str(symbol).strip().upper(), str(reason).strip().lower()),
+            )
 
     def list_position_plans(self):
         with self._lock:

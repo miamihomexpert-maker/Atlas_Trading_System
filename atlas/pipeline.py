@@ -248,6 +248,7 @@ def run_paper_pipeline(
     require_remote_approval=None,
     database=None,
     news_events=None,
+    execute=True,
 ):
     """Scan, then send one recommendation through risk, approval, and the paper broker.
 
@@ -287,7 +288,9 @@ def run_paper_pipeline(
         "execution": "NOT_SUBMITTED",
         "scanned_at": datetime.now(timezone.utc).isoformat(),
     }
-    if recommendation is None:
+    if recommendation is None or not execute:
+        if recommendation is not None:
+            result["execution"] = "PREVIEW"
         return result
     if _remote_approval_required(require_remote_approval) and approval_token is None:
         raise PermissionError("Remote approval token is required.")

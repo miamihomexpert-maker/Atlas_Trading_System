@@ -29,6 +29,13 @@ _TIMEFRAME_PERIODS = {
 }
 
 
+def hard_stop_enabled(explicit=None):
+    """Auto-sell only when price trades through the stored stop and this is on."""
+    if explicit is not None:
+        return bool(explicit)
+    return _env_flag("ATLAS_HARD_STOP", False)
+
+
 def _env_flag(name, default=False):
     raw = os.getenv(name)
     if raw is None:
@@ -115,6 +122,8 @@ def run_paper_session(
     require_remote_approval=None,
     timeframes=None,
     minimum_agreement=None,
+    manual_exits=False,
+    hard_stop=None,
 ):
     """Run one paper pass over the configured watchlist.
 
@@ -161,6 +170,8 @@ def run_paper_session(
                 news_events,
                 approved,
                 require_remote_approval,
+                manual_exits=manual_exits,
+                hard_stop=hard_stop_enabled(hard_stop),
             )
         )
         _notify_cycle(results)
@@ -200,6 +211,8 @@ def _run_symbol(
     approved,
     require_remote_approval,
     max_market_data_age_seconds,
+    manual_exits=False,
+    hard_stop=False,
 ):
     try:
         if histories_by_symbol is not None:
@@ -227,7 +240,30 @@ def _run_symbol(
             require_remote_approval=require_remote_approval,
             database=database,
             news_events=news_events,
+            execute=not manual_exits,
         )
+        if (
+            manual_exits
+            and result.get("decision") == "SELL"
+            and str(symbol).strip().upper() in broker.positions()
+        ):
+            quote = _latest_quote(histories)
+            price = quote[1] if quote else (result.get("recommendation") or {}).get("entry_price")
+            position = broker.positions().get(str(symbol).strip().upper(), {})
+            _stage_exit_alert(
+                database,
+                symbol,
+                "opposing",
+                price,
+                position.get("stop_loss"),
+                position.get("profit_target"),
+                (result.get("recommendation") or {}).get("explanation")
+                or result.get("analysis", {}).get("reason")
+                or "Technical decision is SELL.",
+            )
+            result["exit_reason"] = "opposing"
+            result["execution"] = "RECOMMENDED"
+            result["order"] = None
     except PermissionError as error:
         if "Live trading" in str(error):
             raise
@@ -292,6 +328,8 @@ def run_paper_loop(
         or max_cycles <= 0
     ):
         raise ValueError("max_cycles must be a positive integer when provided.")
+    session_kwargs.setdefault("manual_exits", True)
+    session_kwargs.setdefault("hard_stop", hard_stop_enabled())
     clock = now or (lambda: datetime.now(timezone.utc))
     pause = sleep or time.sleep
     cycles = []
@@ -434,6 +472,8 @@ def _collect_cycle_results(
     news_events,
     approved,
     require_remote_approval,
+    manual_exits=False,
+    hard_stop=False,
 ):
     symbols = list(settings.instruments)
     for symbol in broker.positions():
@@ -450,6 +490,8 @@ def _collect_cycle_results(
             require_remote_approval,
             settings.max_market_data_age_seconds,
             database,
+            manual_exits=manual_exits,
+            hard_stop=hard_stop,
         )
         if exit_result is not None:
             results.append(exit_result)
@@ -478,6 +520,8 @@ def _collect_cycle_results(
                 approved,
                 require_remote_approval,
                 settings.max_market_data_age_seconds,
+                manual_exits=manual_exits,
+                hard_stop=hard_stop,
             )
         )
     return results
@@ -498,6 +542,8 @@ def _protective_exit(
     require_remote_approval,
     max_market_data_age_seconds,
     database,
+    manual_exits=False,
+    hard_stop=False,
 ):
     normalized = str(symbol).strip().upper()
     position = broker.positions().get(normalized)
@@ -532,7 +578,31 @@ def _protective_exit(
     elif price >= position["profit_target"]:
         reason = "target"
     else:
+        if manual_exits:
+            _clear_exit_alert(database, normalized, "stop")
+            _clear_exit_alert(database, normalized, "target")
         return None
+    if manual_exits and not (reason == "stop" and hard_stop):
+        alert_id = _stage_exit_alert(
+            database,
+            normalized,
+            reason,
+            price,
+            position.get("stop_loss"),
+            position.get("profit_target"),
+            (
+                f"Latest close {price:.4f} is at or through the stored {reason} "
+                f"({position.get('stop_loss') if reason == 'stop' else position.get('profit_target')})."
+            ),
+        )
+        return {
+            "symbol": normalized,
+            "decision": "SELL",
+            "order": None,
+            "execution": "RECOMMENDED",
+            "exit_reason": reason,
+            "alert_id": alert_id,
+        }
     signal = _exit_signal(normalized, price, market_timestamp)
     try:
         if _remote_approval_required(require_remote_approval):
@@ -557,6 +627,19 @@ def _protective_exit(
             "error": str(error),
         }
     logger.info("%s protective %s exit %s", normalized, reason, order["status"])
+    if reason == "stop":
+        _clear_exit_alert(database, normalized, "stop")
+        if manual_exits and hard_stop and database is not None:
+            database.record_audit_event(
+                "HARD_STOP_EXECUTED",
+                normalized,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "price": price,
+                    "stop_loss": position.get("stop_loss"),
+                    "order_id": order["order_id"],
+                },
+            )
     return {
         "symbol": normalized,
         "decision": "SELL",
@@ -622,6 +705,28 @@ def _notify_cycle(results):
         if not halt_noted and "Daily loss" in str(item.get("error", "")):
             halt_noted = True
             _notify("Atlas paper trading halted: daily loss limit reached.")
+
+
+def _stage_exit_alert(database, symbol, reason, price, stop_loss, profit_target, message):
+    if database is None or not hasattr(database, "upsert_exit_alert"):
+        return None
+    return database.upsert_exit_alert(
+        symbol,
+        reason,
+        None if price is None else float(price),
+        None if stop_loss is None else float(stop_loss),
+        None if profit_target is None else float(profit_target),
+        {
+            "message": message,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def _clear_exit_alert(database, symbol, reason):
+    if database is None or not hasattr(database, "supersede_exit_alerts"):
+        return
+    database.supersede_exit_alerts(symbol, reason)
 
 
 def _notify(text):
