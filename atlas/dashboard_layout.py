@@ -1,41 +1,64 @@
-"""Pane sizes for the paper dashboard.
+"""Pane sizes and the extra-reading tab for the paper dashboard.
 
-The page stores the same numbers in localStorage under ``LAYOUT_KEY``.
-Invalid saved values fall back to the defaults or the nearest limit.
-Nothing here is market data.
+The chart fills the center. Side widths are the watchlist and the trade list.
+The reading pane is closed until a tab is opened, so Signals and Technicals
+cannot take the chart's height. Nothing here is market data.
 """
 
 import math
 
 
 LAYOUT_KEY = "atlas-paper-layout"
+TAB_KEY = "atlas-paper-tab"
 DEFAULT_LAYOUT = {
     "left": 260,
-    "right": 300,
-    "chart_ratio": 0.68,
+    "right": 320,
+    "reader": 380,
 }
 LAYOUT_LIMITS = {
     "left": (200, 520),
     "right": (240, 560),
-    "chart_ratio": (0.35, 0.88),
+    "reader": (280, 640),
 }
+TAB_IDS = (
+    "signals",
+    "technicals",
+    "news",
+    "model",
+    "company",
+    "risk",
+    "sells",
+)
+DEFAULT_TAB = {"open": False, "tab": "signals"}
 
 
 def clamp_layout(saved=None):
-    """Return left width, right width, and the chart's share of the center.
-
-    ``chart_ratio`` is the fraction of the center column given to the candle
-    chart. The default is larger than an even split with the panels below it.
-    """
+    """Return watchlist width, trade-list width, and reading-pane width."""
     source = saved if isinstance(saved, dict) else {}
     return {
-        "left": _clamp(source, "left", "left"),
-        "right": _clamp(source, "right", "right"),
-        "chart_ratio": _clamp(source, "chart_ratio", "chartRatio"),
+        "left": _clamp_number(source, "left", "left"),
+        "right": _clamp_number(source, "right", "right"),
+        "reader": _clamp_number(source, "reader", "reader"),
     }
 
 
-def _clamp(source, key, alias):
+def clamp_tab(saved=None):
+    """Return which extra panel is selected, and whether it is open.
+
+    The default is closed. An unknown tab name falls back to Signals and
+    stays closed. Buy, Sell, the chart, and the watchlist are not tabs.
+    """
+    source = saved if isinstance(saved, dict) else {}
+    tab = source.get("tab")
+    if tab not in TAB_IDS:
+        tab = DEFAULT_TAB["tab"]
+    opened = source.get("open")
+    if not isinstance(opened, bool):
+        opened = False
+    return {"open": opened, "tab": tab}
+
+
+def _clamp_number(source, key, alias):
     default = DEFAULT_LAYOUT[key]
     low, high = LAYOUT_LIMITS[key]
     raw = source.get(key, source.get(alias, default))
