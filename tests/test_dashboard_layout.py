@@ -81,5 +81,9 @@ def test_page_keeps_the_chart_and_trade_buttons_outside_the_tabs():
     assert 'id="action-sell"' in page
     assert 'scan.buyable ? "" : "disabled"' in page
     assert "No open paper position." in page
+    assert "function decisionClass" in page
+    assert 'decision === "BUY"' in page
+    assert "decisionClass(scan.decision)" in page
+    assert "NEXT STEP · ${scan.symbol}" in page
     assert 'id="clock"' in page
     assert 'id="refresh-now"' in page

@@ -449,12 +449,34 @@ function selectedScan() {
   return state.scans.find((scan) => scan.symbol === state.symbol) || state.scans[0] || null;
 }
 
+function decisionClass(decision) {
+  if (decision === "BUY" || decision === "SELL" || decision === "WAIT" || decision === "NO_DATA") {
+    return "decision " + decision;
+  }
+  return "";
+}
+
+function paintReaderTitle() {
+  const title = document.getElementById("reader-title");
+  if (!title) return;
+  const label = TAB_LABELS[(state.tab && state.tab.tab) || "signals"] || "Details";
+  const scan = selectedScan();
+  if (!scan) {
+    title.textContent = label;
+    title.className = "";
+    return;
+  }
+  title.textContent = `${label} · ${scan.symbol}`;
+  title.className = decisionClass(scan.decision);
+}
+
 function renderSwitchers(portfolio) {
   const symbols = portfolio.instruments || [];
   if (!state.symbol && symbols.length) state.symbol = symbols[0];
-  document.getElementById("symbols").innerHTML = symbols.map((symbol) =>
-    `<button class="symbol-btn ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`
-  ).join("");
+  document.getElementById("symbols").innerHTML = symbols.map((symbol) => {
+    const scan = state.scans.find((item) => item.symbol === symbol);
+    return `<button class="symbol-btn ${decisionClass(scan && scan.decision)} ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`;
+  }).join("");
   document.querySelectorAll("[data-symbol]").forEach((button) => {
     button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
   });
@@ -512,7 +534,7 @@ function renderWatchlist() {
   }
   host.innerHTML = state.scans.map((scan) => `
     <div class="quote">
-      <button class="symbol-btn ${scan.symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${scan.symbol}">${scan.symbol}</button>
+      <button class="symbol-btn ${decisionClass(scan.decision)} ${scan.symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${scan.symbol}">${scan.symbol}</button>
       <span class="decision ${scan.decision}">${text(scan.decision)}</span>
       <div class="muted">Last scan price ${money(scan.price)}</div>
     </div>`).join("");
@@ -539,17 +561,19 @@ function renderDetail() {
   if (!scan) {
     renderTechnicals(null);
     renderCompany(null);
+    paintReaderTitle();
     return;
   }
   const copy = scan.copy || {};
   const frames = copy.timeframes && copy.timeframes.length
     ? copy.timeframes.map((line) => `<p>${line}</p>`).join("")
     : `<p class="muted">${text(copy.why || scan.reason)}</p>`;
-  signals.innerHTML = `<h2>SIGNALS · ${scan.symbol}</h2>${frames}<p class="muted">Scanned ${text(scan.scanned_at)}</p>`;
+  signals.innerHTML = `<h2 class="${decisionClass(scan.decision)}">SIGNALS · ${scan.symbol}</h2>${frames}<p class="muted">Scanned ${text(scan.scanned_at)}</p>`;
   news.innerHTML = renderNews(scan);
-  model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
+  model.innerHTML = `<h2 class="${decisionClass(scan.decision)}">MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
   renderTechnicals(scan);
   renderCompany(scan);
+  paintReaderTitle();
 }
 
 function renderTechnicals(scan) {
@@ -559,7 +583,7 @@ function renderTechnicals(scan) {
     return;
   }
   const lines = (scan.technical_copy && scan.technical_copy.lines) || [];
-  host.innerHTML = `<h2>TECHNICALS · ${scan.symbol}</h2>` + (lines.length
+  host.innerHTML = `<h2 class="${decisionClass(scan.decision)}">TECHNICALS · ${scan.symbol}</h2>` + (lines.length
     ? lines.map((line) => `<p>${text(line)}</p>`).join("")
     : `<p class="muted">The scan did not return technical observations.</p>`);
 }
@@ -639,7 +663,7 @@ function renderCompany(scan) {
     return;
   }
   const copy = scan.company_copy || {};
-  const parts = [`<h2>COMPANY · ${scan.symbol}</h2>`];
+  const parts = [`<h2 class="${decisionClass(scan.decision)}">COMPANY · ${scan.symbol}</h2>`];
   if (copy.summary) parts.push(`<p>${text(copy.summary)}</p>`);
   if (copy.objective) parts.push(`<p>${text(copy.objective)}</p>`);
   (copy.lines || []).forEach((line) => parts.push(`<p>${text(line)}</p>`));
@@ -683,7 +707,7 @@ function sourceLinks(scan) {
 function renderNews(scan) {
   const copy = (scan && scan.copy) || {};
   const payload = (scan && scan.news) || {};
-  let body = `<h2>RELEVANT NEWS · ${escapeHtml(scan.symbol)}</h2><p>${escapeHtml(copy.news)}</p>${sourceLinks(scan)}`;
+  let body = `<h2 class="${decisionClass(scan.decision)}">RELEVANT NEWS · ${escapeHtml(scan.symbol)}</h2><p>${escapeHtml(copy.news)}</p>${sourceLinks(scan)}`;
   if (payload.status === "FETCH_FAILED") return body;
   const items = Array.isArray(payload.items) && payload.items.length
     ? payload.items
@@ -729,7 +753,7 @@ function renderIdeas(explanation) {
     const levels = scan.entry === null ? "" : `<div>Entry ${money(scan.entry)}. Stop ${money(scan.stop)}. Target ${money(scan.target)}. Risk size ${text(scan.quantity)} shares.</div>`;
     return `
     <div class="card ${scan.symbol === state.symbol ? "selected" : ""}" data-pick="${scan.symbol}">
-      <strong>${title}</strong>
+      <strong class="${decisionClass(scan.decision)}">${title}</strong>
       <div>Last scan price ${money(scan.price)}</div>
       <div class="decision ${scan.decision}">${text(copy.decision || scan.decision)}</div>
       <div>${text(copy.why)}</div>
@@ -753,7 +777,7 @@ function renderActions() {
   const buyNote = copy.buy_note || copy.why || "Buy is not available.";
   const sellNote = open ? "Sell is available for the open paper position. You still have to confirm." : "No open paper position.";
   host.innerHTML = `
-    <div class="label">NEXT STEP · ${scan.symbol}</div>
+    <div class="label ${decisionClass(scan.decision)}">NEXT STEP · ${scan.symbol}</div>
     <div class="row">
       <button class="buy" type="button" id="action-buy" ${scan.buyable ? "" : "disabled"}>Buy</button>
       <button class="sell" type="button" id="action-sell" ${open ? "" : "disabled"}>Sell</button>
@@ -772,7 +796,7 @@ function renderAlerts(alerts) {
     ? `<p class="muted">No exit alerts. A stop, target, or opposing signal from the loop appears here for you to OK.</p>`
     : alerts.map((alert) => `
       <div class="alert">
-        <strong>Sell recommended · ${alert.symbol}</strong>
+        <strong class="${decisionClass((state.scans.find((scan) => scan.symbol === alert.symbol) || {}).decision)}">Sell recommended · ${alert.symbol}</strong>
         <div>${text(alert.reason)} · ${text(alert.message)}</div>
         <div class="muted">Observed ${money(alert.price)} · stop ${money(alert.stop_loss)} · target ${money(alert.profit_target)}</div>
         <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">OK sell</button>
@@ -984,7 +1008,7 @@ function applyTab(saved) {
   document.querySelectorAll(".reader-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.panel === next.tab);
   });
-  document.getElementById("reader-title").textContent = TAB_LABELS[next.tab] || "Details";
+  paintReaderTitle();
   drawnBox = "";
   scheduleChartRedraw();
 }
