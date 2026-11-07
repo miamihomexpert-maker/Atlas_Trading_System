@@ -38,10 +38,10 @@
   .layout {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 300px minmax(0, 1fr) 340px;
-    gap: 12px;
-    padding: 8px 14px 14px;
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    padding: 8px 10px 12px;
   }
   .panel, .subpanel {
     background: linear-gradient(180deg, rgba(12, 32, 56, 0.94), rgba(7, 16, 30, 0.94));
@@ -49,9 +49,33 @@
     box-shadow: inset 0 0 22px var(--glow);
   }
   .panel { padding: 12px 14px; min-height: 0; overflow: auto; }
-  .center { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
-  .chart-wrap { flex: 1; min-height: 240px; display: flex; flex-direction: column; padding: 12px 14px; }
-  canvas { width: 100%; flex: 1; min-height: 220px; background: rgba(0, 0, 0, 0.28); }
+  .center { display: flex; flex-direction: column; gap: 0; min-height: 0; min-width: 280px; flex: 1 1 auto; }
+  #pane-left { width: var(--pane-left, 260px); flex: 0 0 var(--pane-left, 260px); }
+  #pane-right { width: var(--pane-right, 300px); flex: 0 0 var(--pane-right, 300px); }
+  #pane-chart { flex: var(--chart-ratio, 0.68) 1 0; min-height: 360px; display: flex; flex-direction: column; padding: 12px 14px; }
+  #pane-lower { flex: calc(1 - var(--chart-ratio, 0.68)) 1 0; min-height: 140px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 0; }
+  .chart-wrap { min-height: 360px; }
+  canvas { width: 100%; height: 0; flex: 1 1 auto; min-height: 280px; background: rgba(0, 0, 0, 0.28); }
+  .splitter {
+    flex: 0 0 10px;
+    cursor: col-resize;
+    touch-action: none;
+    position: relative;
+    background: transparent;
+  }
+  .splitter::after {
+    content: "";
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 4px;
+    width: 2px;
+    background: rgba(122, 215, 255, 0.55);
+    box-shadow: 0 0 8px rgba(80, 200, 255, 0.45);
+  }
+  .splitter-row { flex: 0 0 12px; cursor: row-resize; width: 100%; }
+  .splitter-row::after { top: 5px; bottom: auto; left: 8px; right: 8px; width: auto; height: 2px; }
+  .splitter:focus-visible { outline: 1px solid #7ad7ff; }
   h2 { margin: 12px 0 8px; font-size: 12px; letter-spacing: 0.14em; color: #9adfff; }
   h2:first-child { margin-top: 0; }
   .label { color: var(--muted); font-size: 11px; letter-spacing: 0.14em; margin-bottom: 6px; }
@@ -84,7 +108,9 @@
   .modal .panel { max-width: 440px; }
   @media (max-width: 1100px) {
     body { overflow: auto; height: auto; }
-    .layout, .detail { display: block; }
+    .layout, .detail, #pane-lower { display: block; }
+    .splitter { display: none; }
+    #pane-left, #pane-right, #pane-chart, #pane-lower { width: auto; flex: none; min-height: 0; }
     .panel, .subpanel, .chart-wrap { margin-bottom: 10px; }
   }
 </style>
@@ -106,8 +132,8 @@
     <div class="badge" id="mode-badge">PAPER</div>
   </div>
 </header>
-<div class="layout">
-  <section class="panel">
+<div class="layout" id="workspace">
+  <section class="panel" id="pane-left">
     <h2>WATCHLIST</h2>
     <div id="watchlist" class="muted">Loading ledger…</div>
     <h2>PORTFOLIO</h2>
@@ -119,8 +145,9 @@
     <h2>RECENT FILLS</h2>
     <div id="fills" class="muted">—</div>
   </section>
-  <section class="center">
-    <div class="panel chart-wrap">
+  <div class="splitter" data-split="left" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the watchlist. Double-click to reset the layout."></div>
+  <section class="center" id="pane-center">
+    <div class="panel chart-wrap" id="pane-chart">
       <div class="label">SYMBOL</div>
       <div class="row" id="symbols"></div>
       <div class="label">TIMEFRAME</div>
@@ -128,7 +155,10 @@
       <canvas id="chart" width="900" height="420"></canvas>
       <p id="chart-hover" class="muted">Hover a bar to read its open, high, low, close, and volume.</p>
       <p id="chart-note" class="muted"></p>
+      <p class="muted">Drag the bar under the chart to make it taller or shorter. Drag the side bars to resize the lists. Double-click a bar to reset. The size stays in this browser.</p>
     </div>
+    <div class="splitter splitter-row" data-split="chart" role="separator" aria-orientation="horizontal" tabindex="0" title="Drag to resize the chart. Double-click to reset the layout."></div>
+    <div id="pane-lower">
     <div class="detail">
       <div class="subpanel" id="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
       <div class="subpanel" id="technicals"><h2>TECHNICALS</h2><p class="muted">Waiting for the scan.</p></div>
@@ -137,8 +167,10 @@
     </div>
     <div class="panel" id="company"><h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p></div>
     <div class="panel" id="alerts"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
+    </div>
   </section>
-  <section class="panel">
+  <div class="splitter" data-split="right" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the trade list. Double-click to reset the layout."></div>
+  <section class="panel" id="pane-right">
     <h2>TOP 3 BUY CANDIDATES</h2>
     <p id="candidate-note" class="muted"></p>
     <div id="candidates"></div>
@@ -680,6 +712,127 @@ async function refresh() {
   renderActions();
   renderAlerts(payload.alerts || []);
   await loadCandles();
+}
+
+const LAYOUT_KEY = "atlas-paper-layout";
+const LAYOUT_DEFAULTS = { left: 260, right: 300, chartRatio: 0.68 };
+const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], chartRatio: [0.35, 0.88] };
+
+function clampLayout(saved) {
+  const source = saved && typeof saved === "object" ? saved : {};
+  function number(value, fallback, bounds) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(bounds[1], Math.max(bounds[0], parsed));
+  }
+  return {
+    left: number(source.left, LAYOUT_DEFAULTS.left, LAYOUT_LIMITS.left),
+    right: number(source.right, LAYOUT_DEFAULTS.right, LAYOUT_LIMITS.right),
+    chartRatio: number(source.chartRatio, LAYOUT_DEFAULTS.chartRatio, LAYOUT_LIMITS.chartRatio),
+  };
+}
+
+let redrawFrame = 0;
+let drawnBox = "";
+function scheduleChartRedraw() {
+  if (redrawFrame) cancelAnimationFrame(redrawFrame);
+  redrawFrame = requestAnimationFrame(() => {
+    redrawFrame = 0;
+    if (!state.chart || !state.chart.candles) return;
+    const box = chart.clientWidth + "x" + chart.clientHeight;
+    if (box === drawnBox) return;
+    drawnBox = box;
+    drawCandles(state.chart.candles);
+  });
+}
+
+function applyLayout(layout) {
+  const next = clampLayout(layout);
+  state.layout = next;
+  document.documentElement.style.setProperty("--pane-left", next.left + "px");
+  document.documentElement.style.setProperty("--pane-right", next.right + "px");
+  document.documentElement.style.setProperty("--chart-ratio", String(next.chartRatio));
+  drawnBox = "";
+  scheduleChartRedraw();
+}
+
+function loadLayout() {
+  try {
+    return clampLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY) || "null"));
+  } catch (error) {
+    return clampLayout(null);
+  }
+}
+
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(state.layout)); }
+  catch (error) { /* This browser refused storage. The drag still works until refresh. */ }
+}
+
+function bindSplitters() {
+  document.querySelectorAll(".splitter").forEach((splitter) => {
+    splitter.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const kind = splitter.dataset.split;
+      splitter.setPointerCapture(event.pointerId);
+      function move(ev) {
+        const next = clampLayout(state.layout);
+        if (kind === "left") {
+          next.left = ev.clientX - document.getElementById("pane-left").getBoundingClientRect().left;
+        } else if (kind === "right") {
+          next.right = document.getElementById("pane-right").getBoundingClientRect().right - ev.clientX;
+        } else {
+          const center = document.getElementById("pane-center").getBoundingClientRect();
+          if (center.height) next.chartRatio = (ev.clientY - center.top) / center.height;
+        }
+        applyLayout(next);
+      }
+      function finish() {
+        splitter.removeEventListener("pointermove", move);
+        splitter.removeEventListener("pointerup", finish);
+        splitter.removeEventListener("pointercancel", finish);
+        saveLayout();
+      }
+      splitter.addEventListener("pointermove", move);
+      splitter.addEventListener("pointerup", finish);
+      splitter.addEventListener("pointercancel", finish);
+    });
+    splitter.addEventListener("dblclick", () => {
+      applyLayout(LAYOUT_DEFAULTS);
+      saveLayout();
+    });
+    splitter.addEventListener("keydown", (event) => {
+      const next = clampLayout(state.layout);
+      const step = event.shiftKey ? 48 : 16;
+      if (kindOf(splitter) === "chart") {
+        const ratioStep = event.shiftKey ? 0.08 : 0.03;
+        if (event.key === "ArrowUp" || event.key === "ArrowLeft") next.chartRatio -= ratioStep;
+        else if (event.key === "ArrowDown" || event.key === "ArrowRight") next.chartRatio += ratioStep;
+        else return;
+      } else if (kindOf(splitter) === "left") {
+        if (event.key === "ArrowLeft") next.left -= step;
+        else if (event.key === "ArrowRight") next.left += step;
+        else return;
+      } else {
+        if (event.key === "ArrowLeft") next.right += step;
+        else if (event.key === "ArrowRight") next.right -= step;
+        else return;
+      }
+      event.preventDefault();
+      applyLayout(next);
+      saveLayout();
+    });
+  });
+}
+
+function kindOf(splitter) { return splitter.dataset.split; }
+
+bindSplitters();
+applyLayout(loadLayout());
+window.addEventListener("resize", scheduleChartRedraw);
+if (window.ResizeObserver) {
+  new ResizeObserver(() => scheduleChartRedraw()).observe(document.getElementById("pane-chart"));
 }
 
 chart.addEventListener("mousemove", (event) => {
