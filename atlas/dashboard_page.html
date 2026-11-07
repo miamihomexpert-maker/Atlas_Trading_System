@@ -199,6 +199,7 @@
     <button type="button" data-tab="company">Company</button>
     <button type="button" data-tab="risk">Risk</button>
     <button type="button" data-tab="sells">Sell recommended</button>
+    <button type="button" data-tab="review">Review</button>
   </nav>
   <div class="splitter" id="split-reader" data-split="reader" hidden role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the reading pane. Double-click to reset widths."></div>
   <section class="panel" id="pane-reader" hidden>
@@ -214,6 +215,7 @@
       <div class="reader-panel" id="company" data-panel="company"><h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p></div>
       <div class="reader-panel" id="risk" data-panel="risk"><h2>RISK LIMITS</h2><p class="muted">Waiting for the paper account.</p></div>
       <div class="reader-panel" id="alerts" data-panel="sells"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
+      <div class="reader-panel" id="review" data-panel="review"><h2>REVIEW</h2><p class="muted">No paper fills to review yet.</p></div>
     </div>
   </section>
   <div class="splitter" data-split="right" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the trade list. Double-click to reset widths."></div>
@@ -790,6 +792,45 @@ function renderActions() {
   if (open) sell.onclick = () => askSell(scan.symbol);
 }
 
+function renderReview(review) {
+  const host = document.getElementById("review");
+  const scan = selectedScan();
+  const heading = `<h2 class="${decisionClass(scan && scan.decision)}">REVIEW${scan ? " · " + scan.symbol : ""}</h2>`;
+  if (!review) {
+    host.innerHTML = `${heading}<p>No paper fills to review yet.</p>`;
+    return;
+  }
+  let body = `${heading}<p>${text(review.scoreboard_note)}</p>`;
+  const board = review.scoreboard;
+  if (board && board.reviewed_count) {
+    const rate = finite(board.hit_rate) ? `${(board.hit_rate * 100).toFixed(1)}%` : "—";
+    body += `<p>Reviewed ${board.reviewed_count}. Hits ${board.hit_count}. Hit rate ${rate}.</p>`;
+    body += `<p>Average gain ${money(board.average_gain)}. Average loss ${money(board.average_loss)}.</p>`;
+  }
+  const fills = review.fills || [];
+  body += fills.length ? fills.map((fill) => `
+    <article class="clip">
+      <strong><span class="${decisionClass((state.scans.find((scan) => scan.symbol === fill.symbol) || {}).decision)}">${text(fill.symbol)}</span> ${text(fill.side)}</strong>
+      <div>Filled ${text(fill.quantity)} at ${money(fill.price)} on ${text(fill.filled_at)}.</div>
+      <div>${text(fill.note)}</div>
+      <div class="muted">${fill.result === null || fill.result === undefined ? "No result figure." : "Result " + money(fill.result) + (fill.result_kind ? " (" + fill.result_kind + ")" : "")}</div>
+      <div class="muted">${fill.next_close === null || fill.next_close === undefined ? "" : "Next close " + money(fill.next_close) + " at " + text(fill.next_bar_time)}</div>
+    </article>`).join("") : "";
+  const decisions = review.decisions || [];
+  body += decisions.map((item) => `
+    <article class="clip">
+      <strong class="${decisionClass(item.decision)}">${text(item.symbol)} ${text(item.decision)}</strong>
+      <div>${text(item.note)}</div>
+      <div class="muted">${item.next_return === null || item.next_return === undefined ? "" : "Next bar return " + (item.next_return * 100).toFixed(2) + "%."}</div>
+    </article>`).join("");
+  const model = review.model || {};
+  body += `<p class="muted">${text(model.note)}</p>`;
+  if (model.graded) {
+    body += `<p class="muted">Active model calls graded ${model.graded}. Matched ${model.matched}.</p>`;
+  }
+  host.innerHTML = body;
+}
+
 function renderAlerts(alerts) {
   const host = document.getElementById("alerts");
   const body = (!alerts || !alerts.length)
@@ -845,6 +886,7 @@ async function refresh() {
   renderIdeas(payload.candidate_explanation || "");
   renderActions();
   renderAlerts(payload.alerts || []);
+  renderReview(payload.review);
   await loadCandles();
 }
 
@@ -852,7 +894,7 @@ const LAYOUT_KEY = "atlas-paper-layout";
 const TAB_KEY = "atlas-paper-tab";
 const LAYOUT_DEFAULTS = { left: 260, right: 320, reader: 380 };
 const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], reader: [280, 640] };
-const TAB_IDS = ["signals", "technicals", "news", "model", "company", "risk", "sells"];
+const TAB_IDS = ["signals", "technicals", "news", "model", "company", "risk", "sells", "review"];
 const TAB_LABELS = {
   signals: "Signals",
   technicals: "Technicals",
@@ -861,6 +903,7 @@ const TAB_LABELS = {
   company: "Company",
   risk: "Risk",
   sells: "Sell recommended",
+  review: "Review",
 };
 
 function clampLayout(saved) {
