@@ -32,7 +32,9 @@
   .mark { width: 46px; height: 46px; filter: drop-shadow(0 0 8px rgba(80, 200, 255, 0.65)); }
   h1 { margin: 0; font-size: 26px; letter-spacing: 0.18em; }
   .sub { margin: 0; color: var(--muted); letter-spacing: 0.18em; font-size: 11px; }
-  .badge { margin-left: auto; border: 1px solid var(--amber); color: var(--amber); padding: 6px 12px; letter-spacing: 0.16em; font-weight: 700; }
+  .badge { border: 1px solid var(--amber); color: var(--amber); padding: 6px 12px; letter-spacing: 0.16em; font-weight: 700; }
+  .header-tools { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .clock { text-align: right; font-size: 12px; max-width: 320px; }
   .layout {
     flex: 1;
     min-height: 0;
@@ -74,7 +76,7 @@
   .alert { border: 1px solid var(--amber); padding: 8px; margin-bottom: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   td { padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); vertical-align: top; }
-  .detail { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr; gap: 10px; }
+  .detail { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .subpanel { padding: 10px 12px; min-height: 140px; }
   .error { color: var(--down); }
   .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62); display: none; align-items: center; justify-content: center; }
@@ -98,7 +100,11 @@
     <h1>ATLAS</h1>
     <p class="sub">TRADING SYSTEM · PAPER</p>
   </div>
-  <div class="badge" id="mode-badge">PAPER</div>
+  <div class="header-tools">
+    <div class="clock" id="clock"><p class="muted">Loading the session clock…</p></div>
+    <button id="refresh-now" type="button">Refresh now</button>
+    <div class="badge" id="mode-badge">PAPER</div>
+  </div>
 </header>
 <div class="layout">
   <section class="panel">
@@ -106,6 +112,8 @@
     <div id="watchlist" class="muted">Loading ledger…</div>
     <h2>PORTFOLIO</h2>
     <div id="portfolio" class="muted">—</div>
+    <h2>RISK LIMITS</h2>
+    <div id="risk" class="muted">—</div>
     <h2>OPEN POSITIONS</h2>
     <div id="positions" class="muted">—</div>
     <h2>RECENT FILLS</h2>
@@ -117,11 +125,13 @@
       <div class="row" id="symbols"></div>
       <div class="label">TIMEFRAME</div>
       <div class="row" id="timeframes"></div>
-      <canvas id="chart" width="900" height="360"></canvas>
+      <canvas id="chart" width="900" height="420"></canvas>
+      <p id="chart-hover" class="muted">Hover a bar to read its open, high, low, close, and volume.</p>
       <p id="chart-note" class="muted"></p>
     </div>
     <div class="detail">
       <div class="subpanel" id="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
+      <div class="subpanel" id="technicals"><h2>TECHNICALS</h2><p class="muted">Waiting for the scan.</p></div>
       <div class="subpanel" id="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
       <div class="subpanel" id="model"><h2>MODEL</h2><p class="muted">Waiting for a stored model.</p></div>
     </div>
@@ -150,7 +160,7 @@
 </div>
 <script>
 const TOKEN = "__ATLAS_LOCAL_TOKEN__";
-const state = { symbol: null, timeframe: null, scans: [] };
+const state = { symbol: null, timeframe: null, scans: [], hoverIndex: null, chart: null, clock: null, clockFetchedAt: 0 };
 const chart = document.getElementById("chart");
 
 function money(value) {
@@ -189,9 +199,33 @@ async function post(path, body) {
   return payload;
 }
 
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function drawSeries(ctx, candles, key, color, slot, y) {
+  ctx.strokeStyle = color;
+  ctx.beginPath();
+  let started = false;
+  candles.forEach((bar, index) => {
+    if (!finite(bar[key])) {
+      started = false;
+      return;
+    }
+    const x = index * slot + slot / 2;
+    if (!started) {
+      ctx.moveTo(x, y(bar[key]));
+      started = true;
+    } else {
+      ctx.lineTo(x, y(bar[key]));
+    }
+  });
+  ctx.stroke();
+}
+
 function drawCandles(candles) {
   const width = chart.clientWidth || 800;
-  const height = chart.clientHeight || 320;
+  const height = chart.clientHeight || 360;
   const ratio = window.devicePixelRatio || 1;
   chart.width = width * ratio;
   chart.height = height * ratio;
@@ -200,18 +234,30 @@ function drawCandles(candles) {
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "rgba(4, 12, 24, 0.65)";
   ctx.fillRect(0, 0, width, height);
+  const slot = candles.length ? width / candles.length : width;
+  state.chart = { candles, slot, width };
   if (!candles.length) {
     ctx.fillStyle = "#8eabc4";
     ctx.fillText("No bars returned.", 16, 28);
     return;
   }
-  const max = Math.max(...candles.map((bar) => bar.high));
-  const min = Math.min(...candles.map((bar) => bar.low));
+  const priceH = Math.max(120, Math.floor(height * 0.62));
+  const volTop = priceH + 6;
+  const volH = Math.max(28, Math.floor(height * 0.16));
+  const rsiTop = volTop + volH + 6;
+  const rsiH = Math.max(28, height - rsiTop - 8);
+  const prices = [];
+  candles.forEach((bar) => {
+    [bar.high, bar.low, bar.sma, bar.ema].forEach((value) => {
+      if (finite(value)) prices.push(value);
+    });
+  });
+  const max = Math.max(...prices);
+  const min = Math.min(...prices);
   const span = max - min || 1;
-  const slot = width / candles.length;
+  const y = (value) => 8 + (max - value) / span * (priceH - 16);
   candles.forEach((bar, index) => {
     const x = index * slot + slot / 2;
-    const y = (value) => 12 + (max - value) / span * (height - 24);
     const up = bar.close >= bar.open;
     ctx.strokeStyle = up ? "#3ee0a2" : "#ff5d73";
     ctx.fillStyle = ctx.strokeStyle;
@@ -223,6 +269,82 @@ function drawCandles(candles) {
     const bottom = y(Math.min(bar.open, bar.close));
     ctx.fillRect(x - Math.max(1, slot * 0.28), top, Math.max(2, slot * 0.56), Math.max(1, bottom - top));
   });
+  drawSeries(ctx, candles, "sma", "#7ad7ff", slot, y);
+  drawSeries(ctx, candles, "ema", "#ffc857", slot, y);
+  const last = candles[candles.length - 1];
+  if (finite(last.close)) {
+    const yLast = y(last.close);
+    ctx.save();
+    ctx.strokeStyle = "#e7f6ff";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, yLast);
+    ctx.lineTo(width, yLast);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#e7f6ff";
+    ctx.fillText(money(last.close), 8, Math.max(12, yLast - 4));
+    ctx.restore();
+  }
+  const volumes = candles.map((bar) => finite(bar.volume) ? bar.volume : null);
+  const maxVol = volumes.reduce((peak, value) => value === null ? peak : Math.max(peak, value), 0);
+  if (maxVol > 0) {
+    candles.forEach((bar, index) => {
+      if (!finite(bar.volume)) return;
+      const x = index * slot + slot / 2;
+      const barHeight = (bar.volume / maxVol) * (volH - 4);
+      ctx.fillStyle = bar.close >= bar.open ? "rgba(62,224,162,0.75)" : "rgba(255,93,115,0.75)";
+      ctx.fillRect(x - Math.max(1, slot * 0.28), volTop + volH - barHeight, Math.max(2, slot * 0.56), barHeight);
+    });
+  } else {
+    ctx.fillStyle = "#8eabc4";
+    ctx.fillText("No volume on these bars.", 8, volTop + 16);
+  }
+  const hasRsi = candles.some((bar) => finite(bar.rsi));
+  if (hasRsi) {
+    ctx.strokeStyle = "rgba(142,171,196,0.35)";
+    [30, 70].forEach((level) => {
+      const levelY = rsiTop + (100 - level) / 100 * rsiH;
+      ctx.beginPath();
+      ctx.moveTo(0, levelY);
+      ctx.lineTo(width, levelY);
+      ctx.stroke();
+    });
+    drawSeries(ctx, candles, "rsi", "#c9a6ff", slot, (value) => rsiTop + (100 - value) / 100 * rsiH);
+  } else {
+    ctx.fillStyle = "#8eabc4";
+    ctx.fillText("RSI is not available until there are enough bars.", 8, rsiTop + 16);
+  }
+  if (state.hoverIndex !== null && candles[state.hoverIndex]) {
+    const x = state.hoverIndex * slot + slot / 2;
+    ctx.strokeStyle = "rgba(231,246,255,0.45)";
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+}
+
+function renderHover(bar) {
+  const host = document.getElementById("chart-hover");
+  if (!bar) {
+    host.textContent = "Hover a bar to read its open, high, low, close, and volume.";
+    return;
+  }
+  const periods = state.indicators || {};
+  const part = (label, value) => finite(value) ? `${label} ${money(value)}` : `${label} was not returned for this bar.`;
+  const study = (label, value) => finite(value) ? `${label} ${money(value)}` : `${label} is not available on this bar yet.`;
+  host.textContent = [
+    text(bar.time),
+    part("Open", bar.open),
+    part("High", bar.high),
+    part("Low", bar.low),
+    part("Close", bar.close),
+    part("Volume", bar.volume),
+    study(`SMA ${periods.sma || ""}`.trim(), bar.sma),
+    study(`EMA ${periods.ema || ""}`.trim(), bar.ema),
+    study(`RSI ${periods.rsi || ""}`.trim(), bar.rsi),
+  ].join(" · ");
 }
 
 async function loadCandles() {
@@ -230,8 +352,18 @@ async function loadCandles() {
   if (!state.symbol || !state.timeframe) return;
   const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
   const payload = await response.json();
+  state.hoverIndex = null;
+  state.indicators = payload.indicators || null;
   drawCandles(payload.candles || []);
-  note.textContent = payload.error || `${payload.symbol} ${payload.timeframe} · ${(payload.candles || []).length} bars from the market-data feed`;
+  renderHover(null);
+  const count = (payload.candles || []).length;
+  const indicators = payload.indicators;
+  const legend = indicators
+    ? `SMA ${indicators.sma} and EMA ${indicators.ema} are calculated from these bars. RSI ${indicators.rsi} is the lower panel.`
+    : "Indicator periods were not returned.";
+  note.textContent = payload.error
+    ? `${payload.error} ${legend}`
+    : `${payload.symbol} ${payload.timeframe} · ${count} bars from the market-data feed. ${legend}`;
 }
 
 function selectedScan() {
@@ -326,6 +458,7 @@ function renderDetail() {
   const news = document.getElementById("news");
   const model = document.getElementById("model");
   if (!scan) {
+    renderTechnicals(null);
     renderCompany(null);
     return;
   }
@@ -338,7 +471,87 @@ function renderDetail() {
   news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>${text(copy.news)}</p>` +
     (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : "");
   model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
+  renderTechnicals(scan);
   renderCompany(scan);
+}
+
+function renderTechnicals(scan) {
+  const host = document.getElementById("technicals");
+  if (!scan) {
+    host.innerHTML = `<h2>TECHNICALS</h2><p class="muted">Select a symbol.</p>`;
+    return;
+  }
+  const lines = (scan.technical_copy && scan.technical_copy.lines) || [];
+  host.innerHTML = `<h2>TECHNICALS · ${scan.symbol}</h2>` + (lines.length
+    ? lines.map((line) => `<p>${text(line)}</p>`).join("")
+    : `<p class="muted">The scan did not return technical observations.</p>`);
+}
+
+function renderRisk(portfolio) {
+  const host = document.getElementById("risk");
+  const risk = portfolio && portfolio.risk;
+  if (!risk) {
+    host.innerHTML = `<p class="muted">Risk usage was not returned.</p>`;
+    return;
+  }
+  host.innerHTML = `
+    <p>These are the paper account's limits. A buy is checked again before it is sent.</p>
+    <div>Per trade: at most ${percent(risk.per_trade)} of equity.</div>
+    <div>Cash ${money(risk.cash)}. Equity ${money(risk.equity)}.</div>
+    <div>Open positions use ${money(risk.exposure)} (${percent(risk.exposure_fraction)} of equity). The cap is ${percent(risk.max_exposure)}, which is ${money(risk.exposure_cap)} at this equity.</div>
+    <div>Today's P&amp;L ${money(risk.daily_pnl)}. The halt starts at a loss of ${money(risk.loss_limit)} (${percent(risk.daily_loss)} of equity). Loss used toward that halt: ${percent(risk.loss_used_fraction)}.</div>
+    <div class="muted">${risk.halted ? "The daily-loss halt is on." : "The daily-loss halt is clear."}</div>`;
+}
+
+function percent(value) {
+  if (!finite(value)) return "—";
+  return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
+}
+
+function formatDuration(total) {
+  const seconds = Math.max(0, total);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remain = seconds % 60;
+  return [hours, minutes, remain].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+function renderClock() {
+  const host = document.getElementById("clock");
+  const clock = state.clock;
+  if (!clock || !clock.as_of || !clock.next_event_at) {
+    host.innerHTML = `<div class="muted">The session clock was not returned.</div>`;
+    return;
+  }
+  const fetched = Date.parse(clock.as_of);
+  const elapsed = Number.isFinite(fetched) ? Date.now() - state.clockFetchedAt : 0;
+  const current = Number.isFinite(fetched) ? new Date(fetched + elapsed) : null;
+  const timeLabel = current
+    ? new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }).format(current) + " ET"
+    : text(clock.time_label);
+  const next = Date.parse(clock.next_event_at);
+  let countdown = "The next session change was not returned.";
+  if (Number.isFinite(next) && Number.isFinite(fetched)) {
+    const left = Math.round((next - (fetched + elapsed)) / 1000);
+    const which = clock.next_event === "close" ? "the close" : "the next open";
+    countdown = left >= 0
+      ? `Countdown to ${which}: ${formatDuration(left)}.`
+      : "That session change has passed. Press Refresh now.";
+  }
+  host.innerHTML = `
+    <div>${timeLabel}</div>
+    <div>${text(clock.status_label)}</div>
+    <div class="muted">${countdown}</div>
+    <div class="muted">${text(clock.holiday_note)}</div>`;
 }
 
 function renderCompany(scan) {
@@ -455,8 +668,12 @@ async function refresh() {
   if (!response.ok) throw new Error(payload.error || "State request failed");
   state.scans = payload.scans || [];
   state.positions = (payload.portfolio && payload.portfolio.positions) || [];
+  state.clock = payload.clock || null;
+  state.clockFetchedAt = Date.now();
   renderSwitchers(payload.portfolio);
   renderPortfolio(payload.portfolio);
+  renderRisk(payload.portfolio);
+  renderClock();
   renderWatchlist();
   renderDetail();
   renderIdeas(payload.candidate_explanation || "");
@@ -465,8 +682,27 @@ async function refresh() {
   await loadCandles();
 }
 
+chart.addEventListener("mousemove", (event) => {
+  const layout = state.chart;
+  if (!layout || !layout.candles.length || !layout.slot) return;
+  const rect = chart.getBoundingClientRect();
+  const index = Math.min(layout.candles.length - 1, Math.max(0, Math.floor((event.clientX - rect.left) / layout.slot)));
+  if (index === state.hoverIndex) return;
+  state.hoverIndex = index;
+  drawCandles(layout.candles);
+  renderHover(layout.candles[index]);
+});
+chart.addEventListener("mouseleave", () => {
+  state.hoverIndex = null;
+  if (state.chart) drawCandles(state.chart.candles);
+  renderHover(null);
+});
+document.getElementById("refresh-now").onclick = () => {
+  refresh().catch((error) => { document.getElementById("watchlist").textContent = error.message; });
+};
 refresh().catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 setInterval(() => { refresh().catch(() => {}); }, 20000);
+setInterval(renderClock, 1000);
 </script>
 </body>
 </html>
