@@ -80,6 +80,18 @@ class AtlasDatabase:
                     quantity INTEGER NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS scan_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    price REAL,
+                    bar_time TEXT,
+                    timeframe TEXT,
+                    model_status TEXT,
+                    model_signal TEXT,
+                    model_version TEXT
+                );
                 CREATE TABLE IF NOT EXISTS trade_approvals (
                     token TEXT PRIMARY KEY,
                     chat_id TEXT NOT NULL,
@@ -146,7 +158,9 @@ class AtlasDatabase:
         account,
         position_plan=None,
         clear_position_symbol=None,
+        timestamp=None,
     ):
+        stamp = timestamp or datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection:
             self._connection.execute(
                 """
@@ -157,7 +171,7 @@ class AtlasDatabase:
                 """,
                 (
                     order["order_id"],
-                    datetime.now(timezone.utc).isoformat(),
+                    stamp,
                     order["symbol"],
                     order["side"],
                     order["quantity"],
@@ -172,7 +186,7 @@ class AtlasDatabase:
                 VALUES (?, ?, ?)
                 """,
                 (
-                    datetime.now(timezone.utc).isoformat(),
+                    stamp,
                     float(account["equity"]),
                     float(account["realized_pnl"]),
                 ),
@@ -753,6 +767,72 @@ class AtlasDatabase:
             ).rowcount
             if updated != 1:
                 raise ValueError("Approval execution state does not match the order.")
+
+    def record_scan_observation(
+        self,
+        symbol,
+        decision,
+        price,
+        bar_time,
+        timeframe,
+        model_status,
+        model_signal,
+        model_version,
+    ):
+        """Store one scan decision. A repeat of the same bar is not inserted again."""
+        symbol = str(symbol).strip().upper()
+        decision = str(decision).strip().upper()
+        latest = self.latest_scan_observation(symbol)
+        if (
+            latest is not None
+            and latest["decision"] == decision
+            and latest["bar_time"] == bar_time
+            and latest["model_status"] == model_status
+            and latest["model_signal"] == model_signal
+        ):
+            return latest["id"]
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT INTO scan_observations(
+                    recorded_at, symbol, decision, price, bar_time, timeframe,
+                    model_status, model_signal, model_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    recorded_at,
+                    symbol,
+                    decision,
+                    price,
+                    bar_time,
+                    timeframe,
+                    model_status,
+                    model_signal,
+                    model_version,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def latest_scan_observation(self, symbol):
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM scan_observations
+                WHERE symbol = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(symbol).strip().upper(),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_scan_observations(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM scan_observations ORDER BY id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_metadata(self, key, default=None):
         with self._lock:

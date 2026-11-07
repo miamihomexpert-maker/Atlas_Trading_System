@@ -29,6 +29,7 @@ from atlas.session import (
     resolve_timeframes,
 )
 from atlas.pipeline import run_paper_pipeline
+from atlas.review import build_review, choose_bars, latest_bar
 from config.settings import load_settings
 
 
@@ -214,6 +215,59 @@ class PaperDashboard:
     def clock(self, now=None):
         return session_clock(now)
 
+    def review(self):
+        """Grade stored fills and scan decisions. Does not change a decision."""
+        orders = self.database.list_paper_orders()
+        observations = self.database.list_scan_observations()
+        bars = {}
+        symbols = {row["symbol"] for row in orders} | {row["symbol"] for row in observations}
+        for symbol in symbols:
+            histories = self._histories(symbol)
+            if histories:
+                bars[symbol] = histories
+        report = build_review(orders, observations, bars)
+        encoded = json.dumps(report, sort_keys=True)
+        previous = self.database.get_metadata("paper_review")
+        self.database.set_metadata("paper_review", encoded)
+        if previous != encoded:
+            self.database.record_audit_event(
+                "PAPER_REVIEW",
+                None,
+                {
+                    "scoreboard_note": report["scoreboard_note"],
+                    "reviewed_count": (report["scoreboard"] or {}).get("reviewed_count"),
+                },
+            )
+        return report
+
+    def _record_observation(self, card, histories):
+        decision = str(card.get("decision") or "").upper()
+        if decision not in {"BUY", "WAIT", "SELL"}:
+            return
+        timeframe, bars = choose_bars(histories)
+        last = latest_bar(bars)
+        if last is None:
+            return
+        price = card.get("price")
+        if isinstance(price, bool) or price is None:
+            stored_price = None
+        else:
+            try:
+                stored_price = float(price)
+            except (TypeError, ValueError):
+                stored_price = None
+        model = card.get("model") or {}
+        self.database.record_scan_observation(
+            card["symbol"],
+            decision,
+            stored_price,
+            last["time"],
+            timeframe,
+            model.get("status"),
+            model.get("signal"),
+            model.get("version"),
+        )
+
     def alerts(self):
         rows = []
         for alert in self.database.list_exit_alerts("PENDING"):
@@ -248,6 +302,7 @@ class PaperDashboard:
                 skipped.append(f"{symbol} could not be scored: {error}")
                 continue
             card = self._described(_scan_card(symbol, preview, broker))
+            self._record_observation(card, histories)
             scans.append(card)
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
@@ -826,6 +881,7 @@ def _state_payload(service):
         "qualified_count": ranked["qualified_count"],
         "alerts": service.alerts(),
         "clock": service.clock(),
+        "review": service.review(),
     }
 
 

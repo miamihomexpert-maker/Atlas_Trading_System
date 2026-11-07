@@ -28,6 +28,7 @@ TAB_IDS = (
     "company",
     "risk",
     "sells",
+    "review",
 )
 DEFAULT_TAB = {"open": False, "tab": "signals"}
 
