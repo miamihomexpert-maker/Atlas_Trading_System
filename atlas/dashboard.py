@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -12,7 +13,9 @@ from atlas.config import LIVE_TRADING
 from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
+from atlas.market_hours import session_clock
 from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
+from atlas.technical import calculate_ema, calculate_rsi, calculate_sma
 from atlas.baseline import auto_train_enabled, ensure_baseline_model
 from atlas.company import describe_company, profile_for_symbol, resolve_company_loader
 from atlas.news_feed import resolve_news
@@ -125,6 +128,7 @@ class PaperDashboard:
         card["name"] = self._instrument_name(card["symbol"])
         card["company"] = self._company_profile(card["symbol"])
         card["company_copy"] = describe_company(card["company"])
+        card["technical_copy"] = describe_technicals(card)
         card["copy"] = describe_scan(card)
         return card
 
@@ -202,7 +206,11 @@ class PaperDashboard:
             "recent_fills": fills,
             "instruments": list(self.settings.instruments),
             "timeframes": list(self.timeframes),
+            "risk": _risk_usage(account, daily, broker.current_exposure(), halted),
         }
+
+    def clock(self, now=None):
+        return session_clock(now)
 
     def alerts(self):
         rows = []
@@ -289,20 +297,29 @@ class PaperDashboard:
                 "candles": [],
                 "error": "No bars returned for this symbol and timeframe.",
             }
+        shown = frame.tail(300)
+        sma = calculate_sma(shown)
+        ema = calculate_ema(shown)
+        rsi = calculate_rsi(shown)
         candles = []
-        for stamp, row in frame.tail(300).iterrows():
+        for offset, (stamp, row) in enumerate(shown.iterrows()):
+            volume = row["Volume"] if "Volume" in shown.columns else None
             candles.append({
                 "time": stamp.isoformat() if hasattr(stamp, "isoformat") else str(stamp),
                 "open": float(row["Open"]),
                 "high": float(row["High"]),
                 "low": float(row["Low"]),
                 "close": float(row["Close"]),
-                "volume": float(row["Volume"]),
+                "volume": _finite_number(volume),
+                "sma": _finite_number(sma.iloc[offset]),
+                "ema": _finite_number(ema.iloc[offset]),
+                "rsi": _finite_number(rsi.iloc[offset]),
             })
         return {
             "symbol": normalized,
             "timeframe": timeframe,
             "candles": candles,
+            "indicators": {"sma": 20, "ema": 20, "rsi": 14},
             "error": None,
         }
 
@@ -521,6 +538,61 @@ def describe_scan(card):
     }
 
 
+_TECHNICAL_FIELDS = (
+    ("trend", "Trend"),
+    ("rsi", "RSI"),
+    ("macd", "MACD"),
+    ("bullish_score", "Reasons to buy"),
+    ("bearish_score", "Reasons to sell"),
+    ("breakout", "Breakout"),
+    ("vwap", "VWAP"),
+)
+_TECHNICAL_EXTRAS = (
+    ("momentum", "Momentum"),
+    ("volume", "Volume"),
+    ("volatility", "Volatility"),
+    ("mean_reversion", "Mean reversion"),
+    ("vwap_price", "VWAP price"),
+    ("z_score", "Z score"),
+    ("momentum_pct", "Momentum percent"),
+    ("volume_ratio", "Volume ratio"),
+)
+_TIMEFRAME_LABELS = {
+    "1m": "1 minute",
+    "5m": "5 minute",
+    "15m": "15 minute",
+    "30m": "30 minute",
+    "1h": "1 hour",
+    "1d": "daily",
+    "1w": "weekly",
+}
+
+
+def describe_technicals(card):
+    """Plain readout of scan observations. Missing fields stay missing."""
+    frames = card.get("timeframes") or {}
+    if not frames:
+        return {
+            "lines": ["The scan did not return technical observations for this symbol."],
+        }
+    lines = []
+    for name, frame in frames.items():
+        label = _TIMEFRAME_LABELS.get(name, name)
+        observation = frame if isinstance(frame, dict) else {}
+        lines.append(f"{label.capitalize()} chart")
+        for key, title in _TECHNICAL_FIELDS:
+            value = observation.get(key)
+            if value is None or value == "":
+                lines.append(f"The {label} scan did not return {title}.")
+            else:
+                lines.append(f"{title} on the {label} chart: {value}.")
+        for key, title in _TECHNICAL_EXTRAS:
+            if key not in observation or observation.get(key) is None or observation.get(key) == "":
+                continue
+            lines.append(f"{title} on the {label} chart: {observation[key]}.")
+    return {"lines": lines}
+
+
 def _empty_scan(symbol, reason):
     return {
         "symbol": str(symbol).strip().upper(),
@@ -583,6 +655,14 @@ def _scan_card(symbol, preview, broker):
             "vwap": observations.get("vwap"),
             "bullish_score": observations.get("bullish_score"),
             "bearish_score": observations.get("bearish_score"),
+            "momentum": observations.get("momentum"),
+            "volume": observations.get("volume"),
+            "volatility": observations.get("volatility"),
+            "mean_reversion": observations.get("mean_reversion"),
+            "vwap_price": _finite_number(observations.get("vwap_price")),
+            "z_score": _finite_number(observations.get("z_score")),
+            "momentum_pct": _finite_number(observations.get("momentum_pct")),
+            "volume_ratio": _finite_number(observations.get("volume_ratio")),
         }
     return {
         "symbol": (recommendation or {}).get("instrument") or str(symbol).strip().upper(),
@@ -663,6 +743,54 @@ def _reasons(preview):
     return reasons
 
 
+def _finite_number(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _risk_usage(account, daily_pnl, exposure, halted, limits=None):
+    """Limits from RiskLimits and usage from the paper account. No estimates."""
+    limits = limits or RiskLimits()
+    equity = account.get("equity")
+    exposure_fraction = None
+    loss_limit = None
+    exposure_cap = None
+    loss_used = None
+    if isinstance(equity, (int, float)) and not isinstance(equity, bool) and equity > 0:
+        exposure_fraction = float(exposure) / float(equity)
+        loss_limit = float(equity) * limits.max_daily_loss_fraction
+        exposure_cap = float(equity) * limits.max_position_fraction
+        if (
+            isinstance(daily_pnl, (int, float))
+            and not isinstance(daily_pnl, bool)
+            and daily_pnl < 0
+        ):
+            loss_used = min(1.0, (-float(daily_pnl)) / float(equity))
+        else:
+            loss_used = 0.0
+    return {
+        "per_trade": limits.risk_per_trade_fraction,
+        "max_exposure": limits.max_position_fraction,
+        "daily_loss": limits.max_daily_loss_fraction,
+        "cash": account.get("cash"),
+        "equity": equity,
+        "daily_pnl": daily_pnl,
+        "exposure": exposure,
+        "exposure_fraction": exposure_fraction,
+        "exposure_cap": exposure_cap,
+        "loss_limit": loss_limit,
+        "loss_used_fraction": loss_used,
+        "halted": bool(halted),
+    }
+
+
 def _public_order(order):
     return {
         "order_id": order["order_id"],
@@ -684,6 +812,7 @@ def _state_payload(service):
         "candidate_explanation": ranked["explanation"],
         "qualified_count": ranked["qualified_count"],
         "alerts": service.alerts(),
+        "clock": service.clock(),
     }
 
 
