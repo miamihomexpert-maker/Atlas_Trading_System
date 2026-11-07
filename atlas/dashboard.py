@@ -18,6 +18,7 @@ from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
 from atlas.technical import calculate_ema, calculate_rsi, calculate_sma
 from atlas.baseline import auto_train_enabled, ensure_baseline_model
 from atlas.company import describe_company, profile_for_symbol, resolve_company_loader
+from atlas.news import http_url, yahoo_profile_url, yahoo_quote_url
 from atlas.news_feed import resolve_news
 from atlas.session import (
     _exit_signal,
@@ -129,6 +130,7 @@ class PaperDashboard:
         card["company"] = self._company_profile(card["symbol"])
         card["company_copy"] = describe_company(card["company"])
         card["technical_copy"] = describe_technicals(card)
+        card["links"] = _outbound_links(card)
         card["copy"] = describe_scan(card)
         return card
 
@@ -434,6 +436,16 @@ def lookup_instrument_name(symbol):
     return None
 
 
+def _outbound_links(card):
+    """Yahoo pages for this symbol, plus a website only when the feed returned one."""
+    company = card.get("company") if isinstance(card.get("company"), dict) else {}
+    return {
+        "quote": yahoo_quote_url(card.get("symbol")),
+        "profile": yahoo_profile_url(card.get("symbol")),
+        "website": http_url(company.get("website")),
+    }
+
+
 def describe_scan(card):
     """Plain-language lines for one symbol. Uses only fields already on the card."""
     decision = card.get("decision") or "unavailable"
@@ -609,7 +621,7 @@ def _empty_scan(symbol, reason):
         "agreement": None,
         "scanned_at": None,
         "timeframes": {},
-        "news": {"status": None, "headlines": [], "source": None},
+        "news": {"status": None, "headlines": [], "items": [], "source": None},
         "model": {
             "status": None,
             "reason": None,
@@ -681,7 +693,8 @@ def _scan_card(symbol, preview, broker):
         "timeframes": timeframes,
         "news": {
             "status": news.get("status"),
-            "headlines": list(news.get("headlines") or []),
+            "headlines": [str(item) for item in (news.get("headlines") or [])],
+            "items": [item for item in (news.get("items") or []) if isinstance(item, dict)],
             "source": news.get("source"),
         },
         "model": {

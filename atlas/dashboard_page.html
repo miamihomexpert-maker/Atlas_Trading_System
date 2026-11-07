@@ -49,13 +49,48 @@
     box-shadow: inset 0 0 22px var(--glow);
   }
   .panel { padding: 12px 14px; min-height: 0; overflow: auto; }
-  .center { display: flex; flex-direction: column; gap: 0; min-height: 0; min-width: 280px; flex: 1 1 auto; }
   #pane-left { width: var(--pane-left, 260px); flex: 0 0 var(--pane-left, 260px); }
-  #pane-right { width: var(--pane-right, 300px); flex: 0 0 var(--pane-right, 300px); }
-  #pane-chart { flex: var(--chart-ratio, 0.68) 1 0; min-height: 360px; display: flex; flex-direction: column; padding: 12px 14px; }
-  #pane-lower { flex: calc(1 - var(--chart-ratio, 0.68)) 1 0; min-height: 140px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 0; }
-  .chart-wrap { min-height: 360px; }
-  canvas { width: 100%; height: 0; flex: 1 1 auto; min-height: 280px; background: rgba(0, 0, 0, 0.28); }
+  #pane-right { width: var(--pane-right, 320px); flex: 0 0 var(--pane-right, 320px); }
+  #pane-center { flex: 1 1 auto; min-width: 320px; min-height: 0; display: flex; }
+  #pane-chart { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px 14px; }
+  canvas { width: 100%; height: 0; flex: 1 1 auto; min-height: 220px; background: rgba(0, 0, 0, 0.28); }
+  .tab-rail {
+    flex: 0 0 148px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 6px;
+    min-height: 0;
+    overflow: auto;
+  }
+  .tab-rail button { width: 100%; text-align: left; line-height: 1.25; }
+  .tab-rail button.active { border-color: #7ad7ff; box-shadow: inset 0 0 10px var(--glow); }
+  #pane-reader {
+    width: var(--pane-reader, 380px);
+    flex: 0 0 var(--pane-reader, 380px);
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+  }
+  #pane-reader[hidden] { display: none; }
+  .reader-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .reader-bar strong { letter-spacing: 0.08em; }
+  .reader-bar button { margin-left: auto; }
+  .reader-body { overflow: auto; padding: 10px 12px 16px; min-height: 0; }
+  .reader-panel { display: none; }
+  .reader-panel.active { display: block; }
+  .clip { border-top: 1px solid rgba(122, 215, 255, 0.18); padding: 10px 0; }
+  .clip img, .clip video { display: block; max-width: 100%; height: auto; margin: 6px 0; }
+  .clip h3 { margin: 0 0 4px; font-size: 15px; }
+  .clip a { color: #9adfff; }
+  .splitter[hidden] { display: none; }
   .splitter {
     flex: 0 0 10px;
     cursor: col-resize;
@@ -73,8 +108,6 @@
     background: rgba(122, 215, 255, 0.55);
     box-shadow: 0 0 8px rgba(80, 200, 255, 0.45);
   }
-  .splitter-row { flex: 0 0 12px; cursor: row-resize; width: 100%; }
-  .splitter-row::after { top: 5px; bottom: auto; left: 8px; right: 8px; width: auto; height: 2px; }
   .splitter:focus-visible { outline: 1px solid #7ad7ff; }
   h2 { margin: 12px 0 8px; font-size: 12px; letter-spacing: 0.14em; color: #9adfff; }
   h2:first-child { margin-top: 0; }
@@ -100,18 +133,20 @@
   .alert { border: 1px solid var(--amber); padding: 8px; margin-bottom: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   td { padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); vertical-align: top; }
-  .detail { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .subpanel { padding: 10px 12px; min-height: 140px; }
+  .subpanel { padding: 4px 0 12px; }
   .error { color: var(--down); }
   .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62); display: none; align-items: center; justify-content: center; }
   .modal.open { display: flex; }
   .modal .panel { max-width: 440px; }
   @media (max-width: 1100px) {
     body { overflow: auto; height: auto; }
-    .layout, .detail, #pane-lower { display: block; }
+    .layout { display: block; }
     .splitter { display: none; }
-    #pane-left, #pane-right, #pane-chart, #pane-lower { width: auto; flex: none; min-height: 0; }
-    .panel, .subpanel, .chart-wrap { margin-bottom: 10px; }
+    #pane-left, #pane-right, #pane-center, #pane-chart, #pane-reader, .tab-rail { width: auto; flex: none; min-height: 0; }
+    #pane-chart { min-height: 420px; }
+    canvas { min-height: 320px; height: 320px; }
+    .tab-rail { flex-direction: row; flex-wrap: wrap; }
+    .panel, .subpanel { margin-bottom: 10px; }
   }
 </style>
 </head>
@@ -138,8 +173,7 @@
     <div id="watchlist" class="muted">Loading ledger…</div>
     <h2>PORTFOLIO</h2>
     <div id="portfolio" class="muted">—</div>
-    <h2>RISK LIMITS</h2>
-    <div id="risk" class="muted">—</div>
+    <p class="muted">The full limit breakdown is in the Risk tab.</p>
     <h2>OPEN POSITIONS</h2>
     <div id="positions" class="muted">—</div>
     <h2>RECENT FILLS</h2>
@@ -155,21 +189,34 @@
       <canvas id="chart" width="900" height="420"></canvas>
       <p id="chart-hover" class="muted">Hover a bar to read its open, high, low, close, and volume.</p>
       <p id="chart-note" class="muted"></p>
-      <p class="muted">Drag the bar under the chart to make it taller or shorter. Drag the side bars to resize the lists. Double-click a bar to reset. The size stays in this browser.</p>
-    </div>
-    <div class="splitter splitter-row" data-split="chart" role="separator" aria-orientation="horizontal" tabindex="0" title="Drag to resize the chart. Double-click to reset the layout."></div>
-    <div id="pane-lower">
-    <div class="detail">
-      <div class="subpanel" id="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
-      <div class="subpanel" id="technicals"><h2>TECHNICALS</h2><p class="muted">Waiting for the scan.</p></div>
-      <div class="subpanel" id="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
-      <div class="subpanel" id="model"><h2>MODEL</h2><p class="muted">Waiting for a stored model.</p></div>
-    </div>
-    <div class="panel" id="company"><h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p></div>
-    <div class="panel" id="alerts"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
     </div>
   </section>
-  <div class="splitter" data-split="right" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the trade list. Double-click to reset the layout."></div>
+  <nav class="tab-rail" aria-label="More about the selected symbol">
+    <button type="button" data-tab="signals">Signals</button>
+    <button type="button" data-tab="technicals">Technicals</button>
+    <button type="button" data-tab="news">Relevant News</button>
+    <button type="button" data-tab="model">Model</button>
+    <button type="button" data-tab="company">Company</button>
+    <button type="button" data-tab="risk">Risk</button>
+    <button type="button" data-tab="sells">Sell recommended</button>
+  </nav>
+  <div class="splitter" id="split-reader" data-split="reader" hidden role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the reading pane. Double-click to reset widths."></div>
+  <section class="panel" id="pane-reader" hidden>
+    <div class="reader-bar">
+      <strong id="reader-title">Signals</strong>
+      <button id="reader-close" type="button">Close</button>
+    </div>
+    <div class="reader-body">
+      <div class="reader-panel subpanel" id="signals" data-panel="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
+      <div class="reader-panel subpanel" id="technicals" data-panel="technicals"><h2>TECHNICALS</h2><p class="muted">Waiting for the scan.</p></div>
+      <div class="reader-panel subpanel" id="news" data-panel="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
+      <div class="reader-panel subpanel" id="model" data-panel="model"><h2>MODEL</h2><p class="muted">Waiting for a stored model.</p></div>
+      <div class="reader-panel" id="company" data-panel="company"><h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p></div>
+      <div class="reader-panel" id="risk" data-panel="risk"><h2>RISK LIMITS</h2><p class="muted">Waiting for the paper account.</p></div>
+      <div class="reader-panel" id="alerts" data-panel="sells"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
+    </div>
+  </section>
+  <div class="splitter" data-split="right" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the trade list. Double-click to reset widths."></div>
   <section class="panel" id="pane-right">
     <h2>TOP 3 BUY CANDIDATES</h2>
     <p id="candidate-note" class="muted"></p>
@@ -402,12 +449,34 @@ function selectedScan() {
   return state.scans.find((scan) => scan.symbol === state.symbol) || state.scans[0] || null;
 }
 
+function decisionClass(decision) {
+  if (decision === "BUY" || decision === "SELL" || decision === "WAIT" || decision === "NO_DATA") {
+    return "decision " + decision;
+  }
+  return "";
+}
+
+function paintReaderTitle() {
+  const title = document.getElementById("reader-title");
+  if (!title) return;
+  const label = TAB_LABELS[(state.tab && state.tab.tab) || "signals"] || "Details";
+  const scan = selectedScan();
+  if (!scan) {
+    title.textContent = label;
+    title.className = "";
+    return;
+  }
+  title.textContent = `${label} · ${scan.symbol}`;
+  title.className = decisionClass(scan.decision);
+}
+
 function renderSwitchers(portfolio) {
   const symbols = portfolio.instruments || [];
   if (!state.symbol && symbols.length) state.symbol = symbols[0];
-  document.getElementById("symbols").innerHTML = symbols.map((symbol) =>
-    `<button class="symbol-btn ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`
-  ).join("");
+  document.getElementById("symbols").innerHTML = symbols.map((symbol) => {
+    const scan = state.scans.find((item) => item.symbol === symbol);
+    return `<button class="symbol-btn ${decisionClass(scan && scan.decision)} ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`;
+  }).join("");
   document.querySelectorAll("[data-symbol]").forEach((button) => {
     button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
   });
@@ -465,7 +534,7 @@ function renderWatchlist() {
   }
   host.innerHTML = state.scans.map((scan) => `
     <div class="quote">
-      <button class="symbol-btn ${scan.symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${scan.symbol}">${scan.symbol}</button>
+      <button class="symbol-btn ${decisionClass(scan.decision)} ${scan.symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${scan.symbol}">${scan.symbol}</button>
       <span class="decision ${scan.decision}">${text(scan.decision)}</span>
       <div class="muted">Last scan price ${money(scan.price)}</div>
     </div>`).join("");
@@ -492,19 +561,19 @@ function renderDetail() {
   if (!scan) {
     renderTechnicals(null);
     renderCompany(null);
+    paintReaderTitle();
     return;
   }
   const copy = scan.copy || {};
   const frames = copy.timeframes && copy.timeframes.length
     ? copy.timeframes.map((line) => `<p>${line}</p>`).join("")
     : `<p class="muted">${text(copy.why || scan.reason)}</p>`;
-  signals.innerHTML = `<h2>SIGNALS · ${scan.symbol}</h2>${frames}<p class="muted">Scanned ${text(scan.scanned_at)}</p>`;
-  const headlines = (scan.news && scan.news.headlines) || [];
-  news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>${text(copy.news)}</p>` +
-    (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : "");
-  model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
+  signals.innerHTML = `<h2 class="${decisionClass(scan.decision)}">SIGNALS · ${scan.symbol}</h2>${frames}<p class="muted">Scanned ${text(scan.scanned_at)}</p>`;
+  news.innerHTML = renderNews(scan);
+  model.innerHTML = `<h2 class="${decisionClass(scan.decision)}">MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
   renderTechnicals(scan);
   renderCompany(scan);
+  paintReaderTitle();
 }
 
 function renderTechnicals(scan) {
@@ -514,7 +583,7 @@ function renderTechnicals(scan) {
     return;
   }
   const lines = (scan.technical_copy && scan.technical_copy.lines) || [];
-  host.innerHTML = `<h2>TECHNICALS · ${scan.symbol}</h2>` + (lines.length
+  host.innerHTML = `<h2 class="${decisionClass(scan.decision)}">TECHNICALS · ${scan.symbol}</h2>` + (lines.length
     ? lines.map((line) => `<p>${text(line)}</p>`).join("")
     : `<p class="muted">The scan did not return technical observations.</p>`);
 }
@@ -527,6 +596,7 @@ function renderRisk(portfolio) {
     return;
   }
   host.innerHTML = `
+    <h2>RISK LIMITS</h2>
     <p>These are the paper account's limits. A buy is checked again before it is sent.</p>
     <div>Per trade: at most ${percent(risk.per_trade)} of equity.</div>
     <div>Cash ${money(risk.cash)}. Equity ${money(risk.equity)}.</div>
@@ -593,13 +663,81 @@ function renderCompany(scan) {
     return;
   }
   const copy = scan.company_copy || {};
-  const parts = [`<h2>COMPANY · ${scan.symbol}</h2>`];
+  const parts = [`<h2 class="${decisionClass(scan.decision)}">COMPANY · ${scan.symbol}</h2>`];
   if (copy.summary) parts.push(`<p>${text(copy.summary)}</p>`);
   if (copy.objective) parts.push(`<p>${text(copy.objective)}</p>`);
   (copy.lines || []).forEach((line) => parts.push(`<p>${text(line)}</p>`));
   (copy.missing || []).forEach((line) => parts.push(`<p class="muted">${text(line)}</p>`));
+  parts.push(sourceLinks(scan));
   parts.push(`<p class="muted">Source: ${text(copy.source)}. Read at ${text(copy.fetched_at)}.</p>`);
   host.innerHTML = parts.join("");
+}
+
+function escapeHtml(value) {
+  return text(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[ch]));
+}
+
+function safeUrl(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed) || /\s/.test(trimmed)) return "";
+  return trimmed;
+}
+
+function sourceLinks(scan) {
+  const links = (scan && scan.links) || {};
+  const parts = [];
+  const quote = safeUrl(links.quote);
+  const profile = safeUrl(links.profile);
+  const website = safeUrl(links.website);
+  if (quote) parts.push(`<a href="${escapeHtml(quote)}" target="_blank" rel="noopener noreferrer">Yahoo quote page</a>`);
+  if (profile) parts.push(`<a href="${escapeHtml(profile)}" target="_blank" rel="noopener noreferrer">Yahoo profile page</a>`);
+  parts.push(website
+    ? `<a href="${escapeHtml(website)}" target="_blank" rel="noopener noreferrer">Company website</a>`
+    : `<span class="muted">The feed did not include a company website.</span>`);
+  return `<p>${parts.join(" · ")}</p>`;
+}
+
+function renderNews(scan) {
+  const copy = (scan && scan.copy) || {};
+  const payload = (scan && scan.news) || {};
+  let body = `<h2 class="${decisionClass(scan.decision)}">RELEVANT NEWS · ${escapeHtml(scan.symbol)}</h2><p>${escapeHtml(copy.news)}</p>${sourceLinks(scan)}`;
+  if (payload.status === "FETCH_FAILED") return body;
+  const items = Array.isArray(payload.items) && payload.items.length
+    ? payload.items
+    : (payload.headlines || []).map((title) => ({ title: String(title) }));
+  body += items.map(renderClipping).join("");
+  return body;
+}
+
+function renderClipping(item) {
+  const title = escapeHtml(item && item.title);
+  const url = safeUrl(item && item.url);
+  const heading = url
+    ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+    : `${title}<div class="muted">The feed did not include a link.</div>`;
+  const summary = item && item.summary
+    ? `<p>${escapeHtml(item.summary)}</p>`
+    : `<p class="muted">The feed did not include an excerpt.</p>`;
+  const publisher = item && item.publisher ? `<div class="muted">${escapeHtml(item.publisher)}</div>` : "";
+  const when = item && item.published_at ? `<div class="muted">${escapeHtml(item.published_at)}</div>` : "";
+  const thumb = safeUrl(item && item.thumbnail_url);
+  const image = thumb ? `<img alt="" src="${escapeHtml(thumb)}">` : "";
+  const video = safeUrl(item && item.video_url);
+  let videoHtml = "";
+  if (video) {
+    videoHtml = `<p><a href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">Open the video</a></p>`;
+    if (/\.(mp4|webm|ogg)(\?|#|$)/i.test(video)) {
+      videoHtml += `<video controls src="${escapeHtml(video)}"></video>`;
+    }
+  }
+  return `<article class="clip">${image}<h3>${heading}</h3>${publisher}${when}${summary}${videoHtml}</article>`;
 }
 
 function renderIdeas(explanation) {
@@ -615,14 +753,10 @@ function renderIdeas(explanation) {
     const levels = scan.entry === null ? "" : `<div>Entry ${money(scan.entry)}. Stop ${money(scan.stop)}. Target ${money(scan.target)}. Risk size ${text(scan.quantity)} shares.</div>`;
     return `
     <div class="card ${scan.symbol === state.symbol ? "selected" : ""}" data-pick="${scan.symbol}">
-      <strong>${title}</strong>
+      <strong class="${decisionClass(scan.decision)}">${title}</strong>
       <div>Last scan price ${money(scan.price)}</div>
       <div class="decision ${scan.decision}">${text(copy.decision || scan.decision)}</div>
       <div>${text(copy.why)}</div>
-      ${(copy.timeframes || []).map((line) => `<div class="muted">${line}</div>`).join("")}
-      <div class="muted">${text(copy.news)}</div>
-      <div class="muted">${text(copy.model)}</div>
-      <div class="muted">${text((scan.company_copy || {}).summary)}</div>
       ${levels}
     </div>`;
   }).join("");
@@ -643,7 +777,7 @@ function renderActions() {
   const buyNote = copy.buy_note || copy.why || "Buy is not available.";
   const sellNote = open ? "Sell is available for the open paper position. You still have to confirm." : "No open paper position.";
   host.innerHTML = `
-    <div class="label">NEXT STEP · ${scan.symbol}</div>
+    <div class="label ${decisionClass(scan.decision)}">NEXT STEP · ${scan.symbol}</div>
     <div class="row">
       <button class="buy" type="button" id="action-buy" ${scan.buyable ? "" : "disabled"}>Buy</button>
       <button class="sell" type="button" id="action-sell" ${open ? "" : "disabled"}>Sell</button>
@@ -662,7 +796,7 @@ function renderAlerts(alerts) {
     ? `<p class="muted">No exit alerts. A stop, target, or opposing signal from the loop appears here for you to OK.</p>`
     : alerts.map((alert) => `
       <div class="alert">
-        <strong>Sell recommended · ${alert.symbol}</strong>
+        <strong class="${decisionClass((state.scans.find((scan) => scan.symbol === alert.symbol) || {}).decision)}">Sell recommended · ${alert.symbol}</strong>
         <div>${text(alert.reason)} · ${text(alert.message)}</div>
         <div class="muted">Observed ${money(alert.price)} · stop ${money(alert.stop_loss)} · target ${money(alert.profit_target)}</div>
         <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">OK sell</button>
@@ -715,8 +849,19 @@ async function refresh() {
 }
 
 const LAYOUT_KEY = "atlas-paper-layout";
-const LAYOUT_DEFAULTS = { left: 260, right: 300, chartRatio: 0.68 };
-const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], chartRatio: [0.35, 0.88] };
+const TAB_KEY = "atlas-paper-tab";
+const LAYOUT_DEFAULTS = { left: 260, right: 320, reader: 380 };
+const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], reader: [280, 640] };
+const TAB_IDS = ["signals", "technicals", "news", "model", "company", "risk", "sells"];
+const TAB_LABELS = {
+  signals: "Signals",
+  technicals: "Technicals",
+  news: "Relevant News",
+  model: "Model",
+  company: "Company",
+  risk: "Risk",
+  sells: "Sell recommended",
+};
 
 function clampLayout(saved) {
   const source = saved && typeof saved === "object" ? saved : {};
@@ -728,7 +873,15 @@ function clampLayout(saved) {
   return {
     left: number(source.left, LAYOUT_DEFAULTS.left, LAYOUT_LIMITS.left),
     right: number(source.right, LAYOUT_DEFAULTS.right, LAYOUT_LIMITS.right),
-    chartRatio: number(source.chartRatio, LAYOUT_DEFAULTS.chartRatio, LAYOUT_LIMITS.chartRatio),
+    reader: number(source.reader, LAYOUT_DEFAULTS.reader, LAYOUT_LIMITS.reader),
+  };
+}
+
+function clampTab(saved) {
+  const source = saved && typeof saved === "object" ? saved : {};
+  return {
+    open: source.open === true,
+    tab: TAB_IDS.indexOf(source.tab) >= 0 ? source.tab : "signals",
   };
 }
 
@@ -751,7 +904,7 @@ function applyLayout(layout) {
   state.layout = next;
   document.documentElement.style.setProperty("--pane-left", next.left + "px");
   document.documentElement.style.setProperty("--pane-right", next.right + "px");
-  document.documentElement.style.setProperty("--chart-ratio", String(next.chartRatio));
+  document.documentElement.style.setProperty("--pane-reader", next.reader + "px");
   drawnBox = "";
   scheduleChartRedraw();
 }
@@ -782,9 +935,8 @@ function bindSplitters() {
           next.left = ev.clientX - document.getElementById("pane-left").getBoundingClientRect().left;
         } else if (kind === "right") {
           next.right = document.getElementById("pane-right").getBoundingClientRect().right - ev.clientX;
-        } else {
-          const center = document.getElementById("pane-center").getBoundingClientRect();
-          if (center.height) next.chartRatio = (ev.clientY - center.top) / center.height;
+        } else if (kind === "reader") {
+          next.reader = document.getElementById("pane-reader").getBoundingClientRect().right - ev.clientX;
         }
         applyLayout(next);
       }
@@ -805,14 +957,14 @@ function bindSplitters() {
     splitter.addEventListener("keydown", (event) => {
       const next = clampLayout(state.layout);
       const step = event.shiftKey ? 48 : 16;
-      if (kindOf(splitter) === "chart") {
-        const ratioStep = event.shiftKey ? 0.08 : 0.03;
-        if (event.key === "ArrowUp" || event.key === "ArrowLeft") next.chartRatio -= ratioStep;
-        else if (event.key === "ArrowDown" || event.key === "ArrowRight") next.chartRatio += ratioStep;
-        else return;
-      } else if (kindOf(splitter) === "left") {
+      const kind = kindOf(splitter);
+      if (kind === "left") {
         if (event.key === "ArrowLeft") next.left -= step;
         else if (event.key === "ArrowRight") next.left += step;
+        else return;
+      } else if (kind === "reader") {
+        if (event.key === "ArrowLeft") next.reader += step;
+        else if (event.key === "ArrowRight") next.reader -= step;
         else return;
       } else {
         if (event.key === "ArrowLeft") next.right += step;
@@ -828,8 +980,59 @@ function bindSplitters() {
 
 function kindOf(splitter) { return splitter.dataset.split; }
 
+function loadTab() {
+  try {
+    return clampTab(JSON.parse(localStorage.getItem(TAB_KEY) || "null"));
+  } catch (error) {
+    return clampTab(null);
+  }
+}
+
+function saveTab() {
+  try { localStorage.setItem(TAB_KEY, JSON.stringify(state.tab)); }
+  catch (error) { /* The tab still switches until refresh. */ }
+}
+
+function applyTab(saved) {
+  const next = clampTab(saved);
+  state.tab = next;
+  const reader = document.getElementById("pane-reader");
+  const split = document.getElementById("split-reader");
+  reader.hidden = !next.open;
+  split.hidden = !next.open;
+  document.querySelectorAll("[data-tab]").forEach((button) => {
+    const on = next.open && button.dataset.tab === next.tab;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  document.querySelectorAll(".reader-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.panel === next.tab);
+  });
+  paintReaderTitle();
+  drawnBox = "";
+  scheduleChartRedraw();
+}
+
+function chooseTab(name) {
+  const current = state.tab || clampTab(null);
+  const next = current.open && current.tab === name
+    ? { open: false, tab: name }
+    : { open: true, tab: name };
+  applyTab(next);
+  saveTab();
+}
+
+document.querySelectorAll("[data-tab]").forEach((button) => {
+  button.addEventListener("click", () => chooseTab(button.dataset.tab));
+});
+document.getElementById("reader-close").addEventListener("click", () => {
+  applyTab({ open: false, tab: (state.tab && state.tab.tab) || "signals" });
+  saveTab();
+});
+
 bindSplitters();
 applyLayout(loadLayout());
+applyTab(loadTab());
 window.addEventListener("resize", scheduleChartRedraw);
 if (window.ResizeObserver) {
   new ResizeObserver(() => scheduleChartRedraw()).observe(document.getElementById("pane-chart"));
