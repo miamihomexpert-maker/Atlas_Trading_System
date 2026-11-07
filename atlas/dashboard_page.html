@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="atlas-dashboard-version" content="17">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -52,7 +53,22 @@
   #pane-left { width: var(--pane-left, 260px); flex: 0 0 var(--pane-left, 260px); }
   #pane-right { width: var(--pane-right, 320px); flex: 0 0 var(--pane-right, 320px); }
   #pane-center { flex: 1 1 auto; min-width: 320px; min-height: 0; display: flex; }
-  #pane-chart { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px 14px; }
+  #pane-chart { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px 14px; }
+  #chart-tooltip {
+    position: fixed;
+    z-index: 6;
+    display: none;
+    pointer-events: none;
+    min-width: 168px;
+    padding: 8px 10px;
+    background: rgba(8, 16, 28, 0.94);
+    border: 1px solid rgba(122, 215, 255, 0.5);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    font-size: 12px;
+  }
+  #chart-tooltip.open { display: block; }
+  #chart-tooltip td { border: 0; padding: 1px 10px 1px 0; }
+  #chart-tooltip td:first-child { color: var(--muted); }
   canvas { width: 100%; height: 0; flex: 1 1 auto; min-height: 220px; background: rgba(0, 0, 0, 0.28); }
   .tab-rail {
     flex: 0 0 148px;
@@ -187,6 +203,7 @@
       <div class="label">TIMEFRAME</div>
       <div class="row" id="timeframes"></div>
       <canvas id="chart" width="900" height="420"></canvas>
+      <div id="chart-tooltip" role="tooltip" hidden></div>
       <p id="chart-hover" class="muted">Hover a bar to read its open, high, low, close, and volume.</p>
       <p id="chart-note" class="muted"></p>
     </div>
@@ -396,14 +413,117 @@ function drawCandles(candles) {
     ctx.fillStyle = "#8eabc4";
     ctx.fillText("RSI is not available until there are enough bars.", 8, rsiTop + 16);
   }
+  state.chart = { candles, slot, width, height, y, priceH };
   if (state.hoverIndex !== null && candles[state.hoverIndex]) {
+    const bar = candles[state.hoverIndex];
     const x = state.hoverIndex * slot + slot / 2;
-    ctx.strokeStyle = "rgba(231,246,255,0.45)";
+    ctx.strokeStyle = "rgba(231,246,255,0.75)";
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x, height);
     ctx.stroke();
+    if (finite(bar.close)) {
+      const yClose = y(bar.close);
+      ctx.beginPath();
+      ctx.moveTo(0, yClose);
+      ctx.lineTo(width, yClose);
+      ctx.stroke();
+      const label = money(bar.close);
+      const labelWidth = ctx.measureText(label).width + 10;
+      ctx.fillStyle = "rgba(8, 16, 28, 0.94)";
+      ctx.fillRect(width - labelWidth - 2, yClose - 9, labelWidth, 16);
+      ctx.fillStyle = "#e7f6ff";
+      ctx.fillText(label, width - labelWidth + 4, yClose + 3);
+    }
   }
+}
+
+function barDateParts(value) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return { date: String(value), time: "" };
+  const when = new Date(parsed);
+  return {
+    date: new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(when),
+    time: new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "numeric",
+      minute: "2-digit",
+      hourCycle: "h12",
+    }).format(when),
+  };
+}
+
+function formatVolume(value) {
+  if (!finite(value)) return "";
+  if (Number.isInteger(value)) return value.toLocaleString();
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function tooltipRows(bar) {
+  const periods = state.indicators || {};
+  const rows = [];
+  if (bar.time) {
+    const parts = barDateParts(bar.time);
+    if (parts.date) rows.push(["Date", parts.date]);
+    if (parts.time) rows.push(["Time", parts.time]);
+  }
+  [["Open", bar.open], ["High", bar.high], ["Low", bar.low], ["Close", bar.close]].forEach(([label, value]) => {
+    if (finite(value)) rows.push([label, money(value)]);
+  });
+  if (finite(bar.volume)) rows.push(["Volume", formatVolume(bar.volume)]);
+  [["sma", "SMA"], ["ema", "EMA"], ["rsi", "RSI"]].forEach(([key, label]) => {
+    if (!finite(bar[key])) return;
+    const period = periods[key];
+    rows.push([period ? `${label} ${period}` : label, money(bar[key])]);
+  });
+  return rows;
+}
+
+function showTooltip(bar, event) {
+  const tip = document.getElementById("chart-tooltip");
+  tip.replaceChildren();
+  const rows = tooltipRows(bar);
+  if (!rows.length) {
+    const note = document.createElement("p");
+    note.textContent = "This bar did not include prices.";
+    tip.appendChild(note);
+  } else {
+    const table = document.createElement("table");
+    rows.forEach(([label, value]) => {
+      const tr = document.createElement("tr");
+      const name = document.createElement("td");
+      name.textContent = label;
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      tr.append(name, cell);
+      table.appendChild(tr);
+    });
+    tip.appendChild(table);
+  }
+  tip.hidden = false;
+  tip.classList.add("open");
+  const bounds = chart.getBoundingClientRect();
+  const box = tip.getBoundingClientRect();
+  let left = event.clientX + 16;
+  let top = event.clientY + 16;
+  if (left + box.width > bounds.right - 8) left = event.clientX - box.width - 16;
+  if (top + box.height > bounds.bottom - 8) top = event.clientY - box.height - 16;
+  left = Math.max(bounds.left + 8, Math.min(left, bounds.right - box.width - 8));
+  top = Math.max(bounds.top + 8, Math.min(top, bounds.bottom - box.height - 8));
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
+function hideTooltip() {
+  const tip = document.getElementById("chart-tooltip");
+  tip.classList.remove("open");
+  tip.hidden = true;
 }
 
 function renderHover(bar) {
@@ -1086,15 +1206,19 @@ chart.addEventListener("mousemove", (event) => {
   if (!layout || !layout.candles.length || !layout.slot) return;
   const rect = chart.getBoundingClientRect();
   const index = Math.min(layout.candles.length - 1, Math.max(0, Math.floor((event.clientX - rect.left) / layout.slot)));
-  if (index === state.hoverIndex) return;
-  state.hoverIndex = index;
-  drawCandles(layout.candles);
-  renderHover(layout.candles[index]);
+  if (index !== state.hoverIndex) {
+    state.hoverIndex = index;
+    drawCandles(layout.candles);
+  }
+  const bar = (state.chart && state.chart.candles[index]) || layout.candles[index];
+  renderHover(bar);
+  showTooltip(bar, event);
 });
 chart.addEventListener("mouseleave", () => {
   state.hoverIndex = null;
   if (state.chart) drawCandles(state.chart.candles);
   renderHover(null);
+  hideTooltip();
 });
 document.getElementById("refresh-now").onclick = () => {
   refresh().catch((error) => { document.getElementById("watchlist").textContent = error.message; });

@@ -811,6 +811,34 @@ def _reasons(preview):
     return reasons
 
 
+def chart_tooltip_fields(bar, indicators=None):
+    """Labeled tooltip rows from one returned bar.
+
+    A missing price, volume, or study is left out. A volume of 0 is kept
+    because that is a real value. No other number is filled in.
+    """
+    bar = bar or {}
+    indicators = indicators or {}
+    rows = []
+    if bar.get("time"):
+        rows.append({"label": "Time", "value": str(bar["time"])})
+    for label, key in (("Open", "open"), ("High", "high"), ("Low", "low"), ("Close", "close")):
+        value = _finite_number(bar.get(key))
+        if value is not None:
+            rows.append({"label": label, "value": value})
+    volume = _finite_number(bar.get("volume"))
+    if volume is not None:
+        rows.append({"label": "Volume", "value": volume})
+    for key, label in (("sma", "SMA"), ("ema", "EMA"), ("rsi", "RSI")):
+        value = _finite_number(bar.get(key))
+        if value is None:
+            continue
+        period = indicators.get(key)
+        name = f"{label} {period}".strip() if period else label
+        rows.append({"label": name, "value": value})
+    return rows
+
+
 def _finite_number(value):
     if isinstance(value, bool) or value is None:
         return None
