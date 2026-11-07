@@ -10,7 +10,7 @@ from datetime import datetime
 import os
 import re
 
-from atlas.news import NewsEvent
+from atlas.news import NewsEvent, http_url
 
 
 _POSITIVE_WORDS = (
@@ -98,6 +98,11 @@ def load_news_file(path):
                 sentiment=float(item["sentiment"]),
                 impact=float(item["impact"]),
                 instruments=tuple(item.get("instruments") or ()),
+                url=item.get("url"),
+                summary=item.get("summary"),
+                publisher=item.get("publisher"),
+                thumbnail_url=item.get("thumbnail_url"),
+                video_url=item.get("video_url"),
             )
         )
     return events
@@ -182,7 +187,7 @@ def _event_from_yahoo(item, symbol):
         return None
     if published_at.tzinfo is None:
         return None
-    summary = str(content.get("summary") or content.get("description") or "")
+    summary = str(content.get("summary") or content.get("description") or "").strip()
     text = f"{title} {summary}"
     sentiment, impact, _hits = lexicon_sentiment(text)
     instruments = [symbol]
@@ -193,6 +198,8 @@ def _event_from_yahoo(item, symbol):
         code = str(ticker.get("symbol") or "").strip().upper()
         if code and code not in instruments:
             instruments.append(code)
+    provider = content.get("provider") if isinstance(content.get("provider"), dict) else {}
+    publisher = str(provider.get("displayName") or "").strip() or None
     return NewsEvent(
         event_id=event_id,
         title=title,
@@ -201,4 +208,47 @@ def _event_from_yahoo(item, symbol):
         sentiment=sentiment,
         impact=impact,
         instruments=tuple(instruments),
+        url=_article_url(content),
+        summary=summary or None,
+        publisher=publisher,
+        thumbnail_url=_thumbnail_url(content),
+        video_url=_video_url(content),
     )
+
+
+def _nested_url(value):
+    if isinstance(value, dict):
+        value = value.get("url")
+    return http_url(value)
+
+
+def _article_url(content):
+    for key in ("canonicalUrl", "clickThroughUrl"):
+        url = _nested_url(content.get(key))
+        if url:
+            return url
+    return None
+
+
+def _thumbnail_url(content):
+    thumbnail = content.get("thumbnail")
+    if not isinstance(thumbnail, dict):
+        return None
+    url = http_url(thumbnail.get("originalUrl"))
+    if url:
+        return url
+    resolutions = thumbnail.get("resolutions")
+    if isinstance(resolutions, list):
+        for item in resolutions:
+            if isinstance(item, dict):
+                url = http_url(item.get("url"))
+                if url:
+                    return url
+    return None
+
+
+def _video_url(content):
+    """A video address only when Yahoo labeled the item as a video."""
+    if str(content.get("contentType") or "").upper() != "VIDEO":
+        return None
+    return _nested_url(content.get("previewUrl"))

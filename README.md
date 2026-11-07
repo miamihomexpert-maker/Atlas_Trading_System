@@ -114,7 +114,7 @@ The company panel reads Yahoo Finance through `yfinance` for each configured sym
 
 ## News
 
-Headlines come from Yahoo Finance through `yfinance` for the configured symbols. A fetch error is recorded as `FETCH_FAILED` and does not invent events. Sentiment is counted from a fixed word list in `atlas/news_feed.py`. A headline with none of those words is stored with sentiment 0 and impact 0, which means it was not scored.
+Headlines come from Yahoo Finance through `yfinance` for the configured symbols. A fetch error is recorded as `FETCH_FAILED` and does not invent events. The Relevant News tab links each item to the article URL Yahoo returned, and shows the summary, publisher, time, and thumbnail when those fields are present. A video link is shown only when Yahoo marks the item as a video and includes an address. A headline with no address is shown with a note that the feed did not include a link. The symbol also links to its Yahoo quote page and Yahoo profile page. A company website is linked only when the company feed returns one. Sentiment is counted from a fixed word list in `atlas/news_feed.py`. A headline with none of those words is stored with sentiment 0 and impact 0, which means it was not scored.
 
 `ATLAS_NEWS_FILE` replaces the feed for tests or an offline run:
 

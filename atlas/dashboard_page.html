@@ -86,6 +86,10 @@
   .reader-body { overflow: auto; padding: 10px 12px 16px; min-height: 0; }
   .reader-panel { display: none; }
   .reader-panel.active { display: block; }
+  .clip { border-top: 1px solid rgba(122, 215, 255, 0.18); padding: 10px 0; }
+  .clip img, .clip video { display: block; max-width: 100%; height: auto; margin: 6px 0; }
+  .clip h3 { margin: 0 0 4px; font-size: 15px; }
+  .clip a { color: #9adfff; }
   .splitter[hidden] { display: none; }
   .splitter {
     flex: 0 0 10px;
@@ -190,7 +194,7 @@
   <nav class="tab-rail" aria-label="More about the selected symbol">
     <button type="button" data-tab="signals">Signals</button>
     <button type="button" data-tab="technicals">Technicals</button>
-    <button type="button" data-tab="news">News</button>
+    <button type="button" data-tab="news">Relevant News</button>
     <button type="button" data-tab="model">Model</button>
     <button type="button" data-tab="company">Company</button>
     <button type="button" data-tab="risk">Risk</button>
@@ -542,9 +546,7 @@ function renderDetail() {
     ? copy.timeframes.map((line) => `<p>${line}</p>`).join("")
     : `<p class="muted">${text(copy.why || scan.reason)}</p>`;
   signals.innerHTML = `<h2>SIGNALS · ${scan.symbol}</h2>${frames}<p class="muted">Scanned ${text(scan.scanned_at)}</p>`;
-  const headlines = (scan.news && scan.news.headlines) || [];
-  news.innerHTML = `<h2>NEWS · ${scan.symbol}</h2><p>${text(copy.news)}</p>` +
-    (headlines.length ? `<ul>${headlines.slice(0, 5).map((title) => `<li>${title}</li>`).join("")}</ul>` : "");
+  news.innerHTML = renderNews(scan);
   model.innerHTML = `<h2>MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
   renderTechnicals(scan);
   renderCompany(scan);
@@ -642,8 +644,76 @@ function renderCompany(scan) {
   if (copy.objective) parts.push(`<p>${text(copy.objective)}</p>`);
   (copy.lines || []).forEach((line) => parts.push(`<p>${text(line)}</p>`));
   (copy.missing || []).forEach((line) => parts.push(`<p class="muted">${text(line)}</p>`));
+  parts.push(sourceLinks(scan));
   parts.push(`<p class="muted">Source: ${text(copy.source)}. Read at ${text(copy.fetched_at)}.</p>`);
   host.innerHTML = parts.join("");
+}
+
+function escapeHtml(value) {
+  return text(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[ch]));
+}
+
+function safeUrl(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed) || /\s/.test(trimmed)) return "";
+  return trimmed;
+}
+
+function sourceLinks(scan) {
+  const links = (scan && scan.links) || {};
+  const parts = [];
+  const quote = safeUrl(links.quote);
+  const profile = safeUrl(links.profile);
+  const website = safeUrl(links.website);
+  if (quote) parts.push(`<a href="${escapeHtml(quote)}" target="_blank" rel="noopener noreferrer">Yahoo quote page</a>`);
+  if (profile) parts.push(`<a href="${escapeHtml(profile)}" target="_blank" rel="noopener noreferrer">Yahoo profile page</a>`);
+  parts.push(website
+    ? `<a href="${escapeHtml(website)}" target="_blank" rel="noopener noreferrer">Company website</a>`
+    : `<span class="muted">The feed did not include a company website.</span>`);
+  return `<p>${parts.join(" · ")}</p>`;
+}
+
+function renderNews(scan) {
+  const copy = (scan && scan.copy) || {};
+  const payload = (scan && scan.news) || {};
+  let body = `<h2>RELEVANT NEWS · ${escapeHtml(scan.symbol)}</h2><p>${escapeHtml(copy.news)}</p>${sourceLinks(scan)}`;
+  if (payload.status === "FETCH_FAILED") return body;
+  const items = Array.isArray(payload.items) && payload.items.length
+    ? payload.items
+    : (payload.headlines || []).map((title) => ({ title: String(title) }));
+  body += items.map(renderClipping).join("");
+  return body;
+}
+
+function renderClipping(item) {
+  const title = escapeHtml(item && item.title);
+  const url = safeUrl(item && item.url);
+  const heading = url
+    ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+    : `${title}<div class="muted">The feed did not include a link.</div>`;
+  const summary = item && item.summary
+    ? `<p>${escapeHtml(item.summary)}</p>`
+    : `<p class="muted">The feed did not include an excerpt.</p>`;
+  const publisher = item && item.publisher ? `<div class="muted">${escapeHtml(item.publisher)}</div>` : "";
+  const when = item && item.published_at ? `<div class="muted">${escapeHtml(item.published_at)}</div>` : "";
+  const thumb = safeUrl(item && item.thumbnail_url);
+  const image = thumb ? `<img alt="" src="${escapeHtml(thumb)}">` : "";
+  const video = safeUrl(item && item.video_url);
+  let videoHtml = "";
+  if (video) {
+    videoHtml = `<p><a href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">Open the video</a></p>`;
+    if (/\.(mp4|webm|ogg)(\?|#|$)/i.test(video)) {
+      videoHtml += `<video controls src="${escapeHtml(video)}"></video>`;
+    }
+  }
+  return `<article class="clip">${image}<h3>${heading}</h3>${publisher}${when}${summary}${videoHtml}</article>`;
 }
 
 function renderIdeas(explanation) {
@@ -762,7 +832,7 @@ const TAB_IDS = ["signals", "technicals", "news", "model", "company", "risk", "s
 const TAB_LABELS = {
   signals: "Signals",
   technicals: "Technicals",
-  news: "News",
+  news: "Relevant News",
   model: "Model",
   company: "Company",
   risk: "Risk",

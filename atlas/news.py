@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
+from urllib.parse import urlsplit
+import re
 
 
 _SUPPORTED_CATEGORIES = {
@@ -14,6 +16,38 @@ _SUPPORTED_CATEGORIES = {
 }
 
 
+_TICKER = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+def http_url(value):
+    """Return an http(s) URL, or None when the value is not one."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or any(char.isspace() for char in text):
+        return None
+    parsed = urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return text
+
+
+def yahoo_quote_url(symbol):
+    """Yahoo Finance quote page for a configured symbol. None if the symbol is not a ticker."""
+    normalized = str(symbol or "").strip().upper()
+    if not _TICKER.match(normalized):
+        return None
+    return f"https://finance.yahoo.com/quote/{normalized}"
+
+
+def yahoo_profile_url(symbol):
+    """Yahoo Finance profile page for a configured symbol. None if the symbol is not a ticker."""
+    quote = yahoo_quote_url(symbol)
+    if quote is None:
+        return None
+    return quote + "/profile"
+
+
 @dataclass(frozen=True)
 class NewsEvent:
     event_id: str
@@ -23,6 +57,11 @@ class NewsEvent:
     sentiment: float
     impact: float
     instruments: tuple = ()
+    url: str = None
+    summary: str = None
+    publisher: str = None
+    thumbnail_url: str = None
+    video_url: str = None
 
     def __post_init__(self):
         if not str(self.event_id).strip() or not str(self.title).strip():
@@ -45,6 +84,13 @@ class NewsEvent:
         )
         object.__setattr__(self, "category", category)
         object.__setattr__(self, "instruments", normalized)
+        object.__setattr__(self, "url", http_url(self.url))
+        object.__setattr__(self, "thumbnail_url", http_url(self.thumbnail_url))
+        object.__setattr__(self, "video_url", http_url(self.video_url))
+        summary = str(self.summary).strip() if isinstance(self.summary, str) else ""
+        publisher = str(self.publisher).strip() if isinstance(self.publisher, str) else ""
+        object.__setattr__(self, "summary", summary or None)
+        object.__setattr__(self, "publisher", publisher or None)
 
 
 def assess_news_impact(events, instrument, now=None, max_age_hours=72):
@@ -90,7 +136,21 @@ def assess_news_impact(events, instrument, now=None, max_age_hours=72):
         "sentiment_bias": max(-1.0, min(1.0, bias)),
         "categories": sorted({event.category for event, _ in matched}),
         "headlines": [event.title for event, _ in matched],
+        "items": [news_clip(event) for event, _ in matched],
         "source": "caller-supplied normalized events; no external news provider configured",
+    }
+
+
+def news_clip(event):
+    """Fields the feed actually carried. Missing ones stay None."""
+    return {
+        "title": event.title,
+        "url": event.url,
+        "summary": event.summary,
+        "publisher": event.publisher,
+        "published_at": event.published_at.isoformat(),
+        "thumbnail_url": event.thumbnail_url,
+        "video_url": event.video_url,
     }
 
 

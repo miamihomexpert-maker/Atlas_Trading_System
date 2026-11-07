@@ -13,6 +13,8 @@ import math
 import os
 import re
 
+from atlas.news import http_url
+
 
 _FUND_TYPES = {"ETF", "MUTUALFUND"}
 _COMPANY_TYPES = {"EQUITY"}
@@ -97,6 +99,7 @@ def blank_profile(symbol, status, error=None, source=None, fetched_at=None,
         "asset_classes": [],
         "allocation": [],
         "guidance": None,
+        "website": None,
     }
 
 
@@ -305,6 +308,7 @@ def _read_ticker(symbol, ticker, fetched_at):
     )
     profile["name"] = _company_name(info, symbol)
     profile["objective"] = _text(info.get("longBusinessSummary"))
+    profile["website"] = http_url(info.get("website"))
     currency = _text(info.get("financialCurrency")) or _text(info.get("currency"))
     errors = []
     sources = [_SOURCE_INFO]
