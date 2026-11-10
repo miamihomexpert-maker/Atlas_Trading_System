@@ -26,6 +26,7 @@ TAB_IDS = (
     "news",
     "model",
     "company",
+    "behavior",
     "risk",
     "sells",
     "review",

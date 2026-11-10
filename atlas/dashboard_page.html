@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="21">
+<meta name="atlas-dashboard-version" content="22">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -118,6 +118,18 @@
   #news h3, #news p, #news .clip { color: #f7fbff; }
   #news a { color: #ffd56a; text-decoration: underline; }
   #news .muted { color: #d7e4ef; }
+  #behavior {
+    color: #f7fbff;
+    background: rgba(4, 10, 18, 0.72);
+    padding: 8px 10px;
+  }
+  #behavior h2 { color: #ffffff; }
+  #behavior h2.decision.BUY { color: var(--up); }
+  #behavior h2.decision.SELL { color: var(--down); }
+  #behavior h2.decision.WAIT, #behavior h2.decision.NO_DATA { color: var(--amber); }
+  #behavior p, #behavior li, #behavior .clip { color: #f7fbff; }
+  #behavior a { color: #ffd56a; text-decoration: underline; }
+  #behavior .muted { color: #d7e4ef; }
   .splitter[hidden] { display: none; }
   .splitter {
     flex: 0 0 10px;
@@ -233,6 +245,7 @@
     <button type="button" data-tab="news">Relevant News</button>
     <button type="button" data-tab="model">Model</button>
     <button type="button" data-tab="company">Company</button>
+    <button type="button" data-tab="behavior">Behavior</button>
     <button type="button" data-tab="risk">Risk</button>
     <button type="button" data-tab="sells">Sell recommended</button>
     <button type="button" data-tab="review">Review</button>
@@ -249,6 +262,7 @@
       <div class="reader-panel subpanel" id="news" data-panel="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
       <div class="reader-panel subpanel" id="model" data-panel="model"><h2>MODEL</h2><p class="muted">Waiting for a stored model.</p></div>
       <div class="reader-panel" id="company" data-panel="company"><h2>COMPANY</h2><p class="muted">Select a symbol to see where its money goes. Only figures the feed returned are shown.</p></div>
+      <div class="reader-panel" id="behavior" data-panel="behavior"><h2>BEHAVIOR</h2><p class="muted">Select a symbol to see public filings and later-bar notes. This is not a forecast of profit.</p></div>
       <div class="reader-panel" id="risk" data-panel="risk"><h2>RISK LIMITS</h2><p class="muted">Waiting for the paper account.</p></div>
       <div class="reader-panel" id="alerts" data-panel="sells"><h2>SELL RECOMMENDED</h2><p class="muted">No exit alerts.</p></div>
       <div class="reader-panel" id="review" data-panel="review"><h2>REVIEW</h2><p class="muted">No paper fills to review yet.</p></div>
@@ -757,6 +771,7 @@ function renderDetail() {
   if (!scan) {
     renderTechnicals(null);
     renderCompany(null);
+    renderBehavior(null);
     paintReaderTitle();
     return;
   }
@@ -769,6 +784,7 @@ function renderDetail() {
   model.innerHTML = `<h2 class="${decisionClass(scan.decision)}">MODEL · ${scan.symbol}</h2><p>${text(copy.model)}</p>`;
   renderTechnicals(scan);
   renderCompany(scan);
+  renderBehavior(scan);
   paintReaderTitle();
 }
 
@@ -784,6 +800,39 @@ function renderTechnicals(scan) {
     : `<p class="muted">The scan did not return technical observations.</p>`);
 }
 
+function renderBehavior(scan) {
+  const host = document.getElementById("behavior");
+  if (!scan) {
+    host.innerHTML = `<h2>BEHAVIOR</h2><p class="muted">Select a symbol to see public filings and later-bar notes. This is not a forecast of profit.</p>`;
+    return;
+  }
+  const behavior = scan.behavior || {};
+  const parts = [`<h2 class="${decisionClass(scan.decision)}">BEHAVIOR · ${scan.symbol}</h2>`];
+  (behavior.lines || []).forEach((line) => parts.push(`<p>${escapeHtml(line)}</p>`));
+  const form4 = safeUrl(behavior.sec_form4_search);
+  const form13 = safeUrl(behavior.sec_13f_search);
+  const links = [];
+  if (form4) links.push(`<a href="${escapeHtml(form4)}" target="_blank" rel="noopener noreferrer">SEC Form 4 search</a>`);
+  if (form13) links.push(`<a href="${escapeHtml(form13)}" target="_blank" rel="noopener noreferrer">SEC 13F search</a>`);
+  if (links.length) parts.push(`<p>${links.join(" · ")}</p>`);
+  parts.push(`<p class="muted">Those are search pages, not a claim that a filing was returned.</p>`);
+  (behavior.insiders || []).forEach((row) => parts.push(behaviorRow(row)));
+  (behavior.holders || []).forEach((row) => parts.push(behaviorRow(row)));
+  if (!(behavior.insiders || []).length && !(behavior.holders || []).length) {
+    parts.push(`<p class="muted">No insider or holder row is stored for this symbol.</p>`);
+  }
+  host.innerHTML = parts.join("");
+}
+function behaviorRow(row) {
+  const bits = [escapeHtml(row.summary || "A public row was stored without a summary.")];
+  if (row.url && safeUrl(row.url)) {
+    bits.push(`<a href="${escapeHtml(safeUrl(row.url))}" target="_blank" rel="noopener noreferrer">Source link</a>`);
+  } else {
+    bits.push(`<span class="muted">The feed did not include a filing link.</span>`);
+  }
+  bits.push(`<span class="muted">Recorded ${escapeHtml(row.learned_at)}. Effect ${escapeHtml(row.effect)}.</span>`);
+  return `<article class="clip">${bits.join("<br>")}</article>`;
+}
 function renderRisk(portfolio) {
   const host = document.getElementById("risk");
   const risk = portfolio && portfolio.risk;
@@ -1123,13 +1172,14 @@ const LAYOUT_KEY = "atlas-paper-layout";
 const TAB_KEY = "atlas-paper-tab";
 const LAYOUT_DEFAULTS = { left: 260, right: 320, reader: 380 };
 const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], reader: [280, 640] };
-const TAB_IDS = ["signals", "technicals", "news", "model", "company", "risk", "sells", "review"];
+const TAB_IDS = ["signals", "technicals", "news", "model", "company", "behavior", "risk", "sells", "review"];
 const TAB_LABELS = {
   signals: "Signals",
   technicals: "Technicals",
   news: "Relevant News",
   model: "Model",
   company: "Company",
+  behavior: "Behavior",
   risk: "Risk",
   sells: "Sell recommended",
   review: "Review",

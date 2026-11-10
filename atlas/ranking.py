@@ -31,7 +31,17 @@ def _rank_key(card):
         confidence_rank = (1, 0.0)
     else:
         confidence_rank = (0, -float(confidence))
-    return (tier, confidence_rank, str(card.get("symbol") or ""))
+    decision_name = str(card.get("decision") or "").upper()
+    bias = card.get("learning_bias")
+    if (
+        decision_name not in {"BUY", "SELL"}
+        or isinstance(bias, bool)
+        or not isinstance(bias, int)
+    ):
+        bias_rank = 0
+    else:
+        bias_rank = -bias
+    return (tier, confidence_rank, bias_rank, str(card.get("symbol") or ""))
 
 
 def card_from_pipeline(result, equity, exposure):

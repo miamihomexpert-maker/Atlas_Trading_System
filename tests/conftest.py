@@ -5,3 +5,4 @@ import os
 # facts unless a test asks for that fetch directly.
 os.environ.setdefault("ATLAS_AUTO_TRAIN", "false")
 os.environ.setdefault("ATLAS_COMPANY_FACTS", "false")
+os.environ.setdefault("ATLAS_BEHAVIOR", "false")
