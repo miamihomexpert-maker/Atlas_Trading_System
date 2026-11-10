@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from math import isfinite
 import os
 
+from atlas.universe import resolve_instruments
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -33,11 +35,7 @@ class Settings:
 
 
 def load_settings():
-    symbols = tuple(
-        symbol.strip().upper()
-        for symbol in os.getenv("ATLAS_INSTRUMENTS", "SPY,QQQ").split(",")
-        if symbol.strip()
-    )
+    symbols = resolve_instruments()
     live_setting = os.getenv("ATLAS_LIVE_TRADING", "false").strip().lower()
     if live_setting not in {"false", "0", "no", "true", "1", "yes"}:
         raise ValueError("ATLAS_LIVE_TRADING must be a boolean value.")

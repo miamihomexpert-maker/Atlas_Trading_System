@@ -29,7 +29,9 @@ from atlas.session import (
     resolve_timeframes,
 )
 from atlas.pipeline import run_paper_pipeline
+from atlas.ranking import coverage_note, rank_scans, top_scans
 from atlas.review import build_review, choose_bars, latest_bar
+from atlas.universe import next_batch, scan_batch_size
 from config.settings import load_settings
 
 
@@ -283,7 +285,9 @@ class PaperDashboard:
             })
         return rows
 
-    def candidates(self):
+    def candidates(self, force_scan=False):
+        if self.histories_by_symbol is None:
+            return self._candidates_from_universe(force_scan=force_scan)
         self._prepare()
         broker = self._broker()
         qualified = []
@@ -331,8 +335,110 @@ class PaperDashboard:
         return {
             "candidates": top,
             "scans": scans,
+            "top": top_scans(scans),
             "qualified_count": len(qualified),
             "explanation": explanation,
+        }
+
+    def _scan_batch_due(self):
+        if not self.database.list_symbol_scans():
+            return True
+        stamp = self.database.get_metadata("scan_batch_at")
+        if not stamp:
+            return True
+        try:
+            when = datetime.fromisoformat(str(stamp))
+        except ValueError:
+            return True
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        try:
+            limit = int(os.getenv("ATLAS_SCAN_BATCH_SECONDS", "90"))
+        except ValueError:
+            limit = 90
+        age = (datetime.now(timezone.utc) - when).total_seconds()
+        return age >= max(limit, 1)
+
+    def _scan_one_batch(self):
+        universe = list(self.settings.instruments)
+        start = int(self.database.get_metadata("scan_batch_index") or 0)
+        batch, nxt = next_batch(universe, start, scan_batch_size())
+        self.database.set_metadata("scan_batch_index", str(nxt))
+        self.database.set_metadata("scan_batch_at", datetime.now(timezone.utc).isoformat())
+        if not self._news_explicit:
+            self.news_events, self.news_report = resolve_news(batch)
+        broker = self._broker()
+        if auto_train_enabled():
+            train = batch[:1] if len(universe) > scan_batch_size() else batch
+            ensure_baseline_model(self.database, train)
+        for symbol in batch:
+            histories = self._histories(symbol)
+            if not histories:
+                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, "No market bars returned."))
+                continue
+            try:
+                preview = self._preview(symbol, broker, histories)
+            except Exception as error:
+                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
+                continue
+            card = self._described(_scan_card(symbol, preview, broker))
+            self._record_observation(card, histories)
+            self.database.upsert_symbol_scan(symbol, card)
+        stored = {card["symbol"] for card in self.database.list_symbol_scans()}
+        self.database.set_metadata(
+            "scan_coverage",
+            json.dumps({
+                "universe_size": len(set(universe)),
+                "scanned_count": len(stored & set(universe)),
+                "batch_count": len(batch),
+                "source": "config/sp500.txt",
+            }),
+        )
+
+    def _candidates_from_universe(self, force_scan=False):
+        if force_scan or self._scan_batch_due():
+            self._scan_one_batch()
+        broker = self._broker()
+        equity = broker.account_info()["equity"]
+        exposure = broker.current_exposure()
+        sized = []
+        for card in self.database.list_symbol_scans():
+            card = dict(card)
+            entry, stop = card.get("entry"), card.get("stop")
+            if (
+                card.get("decision") == "BUY"
+                and isinstance(entry, (int, float))
+                and isinstance(stop, (int, float))
+                and not isinstance(entry, bool)
+            ):
+                card["quantity"] = calculate_position_size(
+                    equity, entry, stop, current_exposure=exposure
+                )
+                card["buyable"] = isinstance(card["quantity"], int) and card["quantity"] > 0
+            sized.append(card)
+        ranked = rank_scans(sized)
+        top = [self._described(dict(card)) for card in ranked[:3]]
+        shown = list(top)
+        seen = {card["symbol"] for card in shown}
+        for symbol in broker.positions():
+            if symbol in seen:
+                continue
+            match = next((card for card in sized if card["symbol"] == symbol), None)
+            if match is not None:
+                shown.append(self._described(dict(match)))
+        qualified = [card for card in ranked if card.get("buyable")]
+        coverage = json.loads(self.database.get_metadata("scan_coverage") or "{}")
+        return {
+            "candidates": qualified[:3],
+            "scans": shown,
+            "top": top,
+            "qualified_count": len(qualified),
+            "explanation": coverage_note(
+                coverage.get("universe_size") or len(self.settings.instruments),
+                coverage.get("scanned_count") if coverage else len(sized),
+                len(qualified),
+                coverage.get("batch_count") or 0,
+            ),
         }
 
     def candles(self, symbol, timeframe):
@@ -898,14 +1004,15 @@ def _public_order(order):
     }
 
 
-def _state_payload(service):
+def _state_payload(service, force_scan=False):
     portfolio = service.portfolio()
-    ranked = service.candidates()
+    ranked = service.candidates(force_scan=force_scan)
     return {
         "portfolio": portfolio,
         "candidates": ranked["candidates"],
         "scans": ranked.get("scans") or [],
         "candidate_explanation": ranked["explanation"],
+        "top": ranked.get("top") or ranked["scans"],
         "qualified_count": ranked["qualified_count"],
         "alerts": service.alerts(),
         "clock": service.clock(),
@@ -951,7 +1058,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, page, "text/html; charset=utf-8")
                 return
             if path == "/api/state":
-                self._send(200, _state_payload(self.service))
+                params = parse_qs(urlsplit(self.path).query)
+                force = (params.get("scan") or ["0"])[0] in {"1", "true", "yes"}
+                self._send(200, _state_payload(self.service, force_scan=force))
                 return
             if path == "/api/candles":
                 params = parse_qs(urlsplit(self.path).query)

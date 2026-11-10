@@ -122,10 +122,10 @@ def run_paper_session(
         minimum_agreement = 2 if len(timeframes) >= 2 else 1
     if approved is None:
         approved = _env_flag("ATLAS_PAPER_APPROVED", False)
-    if news_events is None:
-        from atlas.news_feed import resolve_news
-
-        news_events, news_report = resolve_news(settings.instruments)
+    fetch_news = news_events is None
+    if fetch_news:
+        news_events = None
+        news_report = None
     else:
         news_report = {"status": "OVERRIDE", "error": None, "source": "caller"}
 
@@ -143,11 +143,6 @@ def run_paper_session(
             )
         if broker.account_info().get("trading_mode") != "PAPER":
             raise PermissionError("Live trading is disabled.")
-        from atlas.baseline import auto_train_enabled, ensure_baseline_model
-
-        if auto_train_enabled():
-            ensure_baseline_model(database, settings.instruments)
-
         results.extend(
             _collect_cycle_results(
                 settings,
@@ -163,6 +158,7 @@ def run_paper_session(
                 manual_exits=manual_exits,
                 hard_stop=hard_stop_enabled(hard_stop),
                 company_loader=company_loader,
+                fetch_news=fetch_news,
             )
         )
         _notify_cycle(results)
@@ -205,6 +201,7 @@ def _run_symbol(
     max_market_data_age_seconds,
     manual_exits=False,
     hard_stop=False,
+    execute=None,
 ):
     try:
         if histories_by_symbol is not None:
@@ -233,7 +230,7 @@ def _run_symbol(
             database=database,
             news_events=news_events,
             news_report=news_report,
-            execute=not manual_exits,
+            execute=not manual_exits if execute is None else execute,
         )
         if (
             manual_exits
@@ -469,11 +466,37 @@ def _collect_cycle_results(
     manual_exits=False,
     hard_stop=False,
     company_loader=None,
+    fetch_news=False,
 ):
-    symbols = list(settings.instruments)
+    from atlas.ranking import card_from_pipeline, rank_scans
+    from atlas.universe import next_batch, scan_batch_size
+
+    universe = list(settings.instruments)
+    batch_size = scan_batch_size()
+    large_universe = histories_by_symbol is None and len(universe) > batch_size
+    if large_universe:
+        start = int(database.get_metadata("scan_batch_index") or 0)
+        batch, next_index = next_batch(universe, start, batch_size)
+        database.set_metadata("scan_batch_index", str(next_index))
+        database.set_metadata(
+            "scan_batch_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
+    else:
+        batch = universe
+    symbols = list(batch)
     for symbol in broker.positions():
         if symbol not in symbols:
             symbols.append(symbol)
+    if fetch_news:
+        from atlas.news_feed import resolve_news
+
+        news_events, news_report = resolve_news(symbols)
+    from atlas.baseline import auto_train_enabled, ensure_baseline_model
+
+    if auto_train_enabled():
+        train_symbols = symbols[:1] if large_universe else symbols
+        ensure_baseline_model(database, train_symbols)
     results = []
     for symbol in symbols:
         histories = _histories_for(symbol, timeframes, histories_by_symbol)
@@ -496,32 +519,88 @@ def _collect_cycle_results(
             continue
         if not histories:
             logger.info("%s has no market bars; no order submitted", symbol)
-            results.append({
+            empty = {
                 "symbol": str(symbol).strip().upper(),
                 "status": "NO_DATA",
                 "order": None,
                 "execution": "NOT_SUBMITTED",
-            })
+            }
+            _remember_scan(database, broker, empty)
+            results.append(empty)
             continue
-        results.append(
-            _run_symbol(
-                symbol,
+        result = _run_symbol(
+            symbol,
+            broker,
+            database,
+            timeframes,
+            minimum_agreement,
+            {str(symbol).strip().upper(): histories},
+            news_events,
+            news_report,
+            approved,
+            require_remote_approval,
+            settings.max_market_data_age_seconds,
+            manual_exits=manual_exits,
+            hard_stop=hard_stop,
+            execute=False if large_universe else None,
+        )
+        _remember_scan(database, broker, result)
+        results.append(result)
+    if large_universe and not manual_exits and approved:
+        stored = database.list_symbol_scans()
+        held = set(broker.positions())
+        for card in rank_scans(stored)[:3]:
+            if not card.get("buyable") or card["symbol"] in held or card["symbol"] not in batch:
+                continue
+            filled = _run_symbol(
+                card["symbol"],
                 broker,
                 database,
                 timeframes,
                 minimum_agreement,
-                {str(symbol).strip().upper(): histories},
+                None,
                 news_events,
                 news_report,
                 approved,
                 require_remote_approval,
                 settings.max_market_data_age_seconds,
-                manual_exits=manual_exits,
+                manual_exits=False,
                 hard_stop=hard_stop,
+                execute=True,
             )
-        )
-    _attach_company_facts(results, settings.instruments, company_loader)
+            results.append(filled)
+    _remember_coverage(database, universe)
+    _attach_company_facts(results, batch, company_loader)
     return results
+
+
+def _remember_scan(database, broker, result):
+    from atlas.ranking import card_from_pipeline
+
+    if not (result.get("analysis") or result.get("decision") or result.get("status") == "NO_DATA"):
+        return
+    account = broker.account_info()
+    card = card_from_pipeline(result, account["equity"], broker.current_exposure())
+    if result.get("status") == "NO_DATA" and not result.get("decision"):
+        card["decision"] = "NO_DATA"
+        card["reason"] = card["reason"] or "No market bars returned."
+        card["buyable"] = False
+    database.upsert_symbol_scan(card["symbol"], card)
+
+
+def _remember_coverage(database, universe):
+    import json
+
+    stored = {card["symbol"] for card in database.list_symbol_scans()}
+    universe_symbols = {str(symbol).strip().upper() for symbol in universe}
+    database.set_metadata(
+        "scan_coverage",
+        json.dumps({
+            "universe_size": len(universe_symbols),
+            "scanned_count": len(stored & universe_symbols),
+            "source": "config/sp500.txt",
+        }),
+    )
 
 
 def _attach_company_facts(results, instruments, company_loader):
