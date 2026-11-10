@@ -75,7 +75,11 @@ def fetch_session_histories(symbol, timeframes):
     for timeframe in timeframes:
         interval = "1wk" if timeframe == "1w" else timeframe
         period = _TIMEFRAME_PERIODS.get(timeframe, "1mo")
-        history = get_stock_history(symbol, period=period, interval=interval)
+        try:
+            history = get_stock_history(symbol, period=period, interval=interval)
+        except Exception as error:
+            logger.info("%s %s history skipped: %s", symbol, timeframe, error)
+            continue
         if history is not None and not history.empty:
             histories[timeframe] = history
     return histories
@@ -499,53 +503,74 @@ def _collect_cycle_results(
         ensure_baseline_model(database, train_symbols)
     results = []
     for symbol in symbols:
-        histories = _histories_for(symbol, timeframes, histories_by_symbol)
-        exit_result = _protective_exit(
-            symbol,
-            histories,
-            broker,
-            approved,
-            require_remote_approval,
-            settings.max_market_data_age_seconds,
-            database,
-            manual_exits=manual_exits,
-            hard_stop=hard_stop,
-        )
-        if exit_result is not None:
-            results.append(exit_result)
-            if exit_result.get("execution") == "FILLED":
-                continue
-        if symbol not in settings.instruments:
-            continue
-        if not histories:
-            logger.info("%s has no market bars; no order submitted", symbol)
-            empty = {
+        try:
+            histories = _histories_for(symbol, timeframes, histories_by_symbol)
+        except Exception as error:
+            logger.info("%s history skipped: %s", symbol, error)
+            results.append({
                 "symbol": str(symbol).strip().upper(),
                 "status": "NO_DATA",
                 "order": None,
                 "execution": "NOT_SUBMITTED",
-            }
-            _remember_scan(database, broker, empty)
-            results.append(empty)
+                "error": str(error),
+            })
             continue
-        result = _run_symbol(
-            symbol,
-            broker,
-            database,
-            timeframes,
-            minimum_agreement,
-            {str(symbol).strip().upper(): histories},
-            news_events,
-            news_report,
-            approved,
-            require_remote_approval,
-            settings.max_market_data_age_seconds,
-            manual_exits=manual_exits,
-            hard_stop=hard_stop,
-            execute=False if large_universe else None,
-        )
-        _remember_scan(database, broker, result)
-        results.append(result)
+        try:
+            exit_result = _protective_exit(
+                symbol,
+                histories,
+                broker,
+                approved,
+                require_remote_approval,
+                settings.max_market_data_age_seconds,
+                database,
+                manual_exits=manual_exits,
+                hard_stop=hard_stop,
+            )
+            if exit_result is not None:
+                results.append(exit_result)
+                if exit_result.get("execution") == "FILLED":
+                    continue
+            if symbol not in settings.instruments:
+                continue
+            if not histories:
+                logger.info("%s has no market bars; no order submitted", symbol)
+                empty = {
+                    "symbol": str(symbol).strip().upper(),
+                    "status": "NO_DATA",
+                    "order": None,
+                    "execution": "NOT_SUBMITTED",
+                }
+                _remember_scan(database, broker, empty)
+                results.append(empty)
+                continue
+            result = _run_symbol(
+                symbol,
+                broker,
+                database,
+                timeframes,
+                minimum_agreement,
+                {str(symbol).strip().upper(): histories},
+                news_events,
+                news_report,
+                approved,
+                require_remote_approval,
+                settings.max_market_data_age_seconds,
+                manual_exits=manual_exits,
+                hard_stop=hard_stop,
+                execute=False if large_universe else None,
+            )
+            _remember_scan(database, broker, result)
+            results.append(result)
+        except Exception as error:
+            logger.info("%s paper pass skipped: %s", symbol, error)
+            results.append({
+                "symbol": str(symbol).strip().upper(),
+                "status": "NO_DATA",
+                "order": None,
+                "execution": "NOT_SUBMITTED",
+                "error": str(error),
+            })
     if large_universe and not manual_exits and approved:
         stored = database.list_symbol_scans()
         held = set(broker.positions())

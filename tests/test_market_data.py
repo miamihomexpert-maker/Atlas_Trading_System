@@ -63,6 +63,31 @@ def test_resample_ohlcv_aggregates_correct_bar_fields():
     }
 
 
+def test_normalize_keeps_valid_bars_and_drops_an_invalid_one():
+    index = pd.date_range("2026-11-10 14:00", periods=2, freq="h", tz="UTC")
+    history = pd.DataFrame(
+        {
+            "Open": [10, 12],
+            "High": [11, 11],
+            "Low": [9, 13],
+            "Close": [10.5, 12],
+            "Volume": [100, 50],
+        },
+        index=index,
+    )
+
+    result = normalize_ohlcv(history)
+
+    assert len(result) == 1
+    assert result.iloc[0].to_dict() == {
+        "Open": 10,
+        "High": 11,
+        "Low": 9,
+        "Close": 10.5,
+        "Volume": 100,
+    }
+
+
 def test_normalize_rejects_bad_ohlcv():
     history = pd.DataFrame(
         {
@@ -75,6 +100,52 @@ def test_normalize_rejects_bad_ohlcv():
     )
     with pytest.raises(ValueError, match="invalid OHLCV"):
         normalize_ohlcv(history)
+
+
+def test_stock_history_returns_valid_bars_when_one_bar_is_invalid(monkeypatch):
+    index = pd.date_range("2026-11-10 14:00", periods=2, freq="h", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "Open": [10, 12],
+            "High": [11, 11],
+            "Low": [9, 13],
+            "Close": [10.5, 12],
+            "Volume": [100, 50],
+        },
+        index=index,
+    )
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            assert symbol == "XYZ"
+
+        def history(self, period, interval):
+            return frame
+
+    monkeypatch.setattr("atlas.market_data.yf.Ticker", FakeTicker)
+    from atlas.market_data import get_stock_history
+
+    result = get_stock_history("XYZ", period="5d", interval="1h")
+
+    assert list(result["Close"]) == [10.5]
+
+
+def test_stock_history_returns_none_when_every_bar_is_invalid(monkeypatch):
+    frame = pd.DataFrame(
+        {"Open": [10], "High": [9], "Low": [8], "Close": [9], "Volume": [100]}
+    )
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, period, interval):
+            return frame
+
+    monkeypatch.setattr("atlas.market_data.yf.Ticker", FakeTicker)
+    from atlas.market_data import get_stock_history
+
+    assert get_stock_history("XYZ", period="5d", interval="1h") is None
 
 
 def test_multi_timeframe_fetch_normalizes_each_requested_interval(monkeypatch):

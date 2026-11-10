@@ -372,7 +372,11 @@ class PaperDashboard:
             train = batch[:1] if len(universe) > scan_batch_size() else batch
             ensure_baseline_model(self.database, train)
         for symbol in batch:
-            histories = self._histories(symbol)
+            try:
+                histories = self._histories(symbol)
+            except Exception as error:
+                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
+                continue
             if not histories:
                 self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, "No market bars returned."))
                 continue
@@ -397,7 +401,10 @@ class PaperDashboard:
 
     def _candidates_from_universe(self, force_scan=False):
         if force_scan or self._scan_batch_due():
-            self._scan_one_batch()
+            try:
+                self._scan_one_batch()
+            except Exception as error:
+                logger.info("Scan batch skipped: %s", error)
         broker = self._broker()
         equity = broker.account_info()["equity"]
         exposure = broker.current_exposure()
@@ -1005,8 +1012,54 @@ def _public_order(order):
 
 
 def _state_payload(service, force_scan=False):
-    portfolio = service.portfolio()
-    ranked = service.candidates(force_scan=force_scan)
+    try:
+        portfolio = service.portfolio()
+    except Exception as error:
+        logger.info("Portfolio read failed: %s", error)
+        portfolio = {
+            "mode": "PAPER",
+            "live_trading": False,
+            "cash": None,
+            "equity": None,
+            "daily_pnl": None,
+            "positions": [],
+            "recent_fills": [],
+            "instruments": [],
+            "timeframes": [],
+            "error": str(error),
+        }
+    try:
+        ranked = service.candidates(force_scan=force_scan)
+    except Exception as error:
+        logger.info("Scan read failed: %s", error)
+        ranked = {
+            "candidates": [],
+            "scans": [],
+            "top": [],
+            "qualified_count": 0,
+            "explanation": str(error),
+        }
+    try:
+        alerts = service.alerts()
+    except Exception as error:
+        logger.info("Alert read failed: %s", error)
+        alerts = []
+    try:
+        clock = service.clock()
+    except Exception as error:
+        logger.info("Clock read failed: %s", error)
+        clock = None
+    try:
+        review = service.review()
+    except Exception as error:
+        logger.info("Review read failed: %s", error)
+        review = {
+            "fills": [],
+            "decisions": [],
+            "scoreboard": None,
+            "scoreboard_note": str(error),
+            "model": {"note": str(error), "graded": 0, "matched": 0},
+        }
     return {
         "portfolio": portfolio,
         "candidates": ranked["candidates"],
@@ -1014,9 +1067,9 @@ def _state_payload(service, force_scan=False):
         "candidate_explanation": ranked["explanation"],
         "top": ranked.get("top") or ranked["scans"],
         "qualified_count": ranked["qualified_count"],
-        "alerts": service.alerts(),
-        "clock": service.clock(),
-        "review": service.review(),
+        "alerts": alerts,
+        "clock": clock,
+        "review": review,
     }
 
 
