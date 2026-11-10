@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="24">
+<meta name="atlas-dashboard-version" content="25">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -701,23 +701,33 @@ function renderSwitchers(portfolio) {
   if (!symbols.length && (portfolio.instruments || []).length <= 12) {
     (portfolio.instruments || []).forEach((symbol) => symbols.push(symbol));
   }
-  if (!state.symbol && symbols.length) state.symbol = symbols[0];
+  const frames = state.chartTimeframes.length ? state.chartTimeframes : (portfolio.timeframes || []);
+  const allowed = [];
+  function addAllowed(symbol) {
+    const cleaned = cleanSymbol(symbol);
+    if (cleaned && allowed.indexOf(cleaned) < 0) allowed.push(cleaned);
+  }
+  (state.scans || []).forEach((scan) => addAllowed(scan && scan.symbol));
+  (state.top || []).forEach((scan) => addAllowed(scan && scan.symbol));
+  symbols.forEach(addAllowed);
+  const resolved = resolveSelection(state.symbol, state.timeframe, allowed, symbols, frames);
+  if (resolved.symbol !== state.symbol || resolved.timeframe !== state.timeframe) {
+    state.symbol = resolved.symbol;
+    state.timeframe = resolved.timeframe;
+    saveSelection();
+  }
   document.getElementById("symbols").innerHTML = symbols.map((symbol) => {
     const scan = state.scans.find((item) => item.symbol === symbol);
     return `<button class="symbol-btn ${decisionClass(scan && scan.decision)} ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`;
   }).join("");
-  document.querySelectorAll("[data-symbol]").forEach((button) => {
-    button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
+  document.querySelectorAll("#symbols [data-symbol]").forEach((button) => {
+    button.onclick = () => chooseSymbol(button.dataset.symbol);
   });
-  const frames = state.chartTimeframes.length ? state.chartTimeframes : (portfolio.timeframes || []);
-  if (!state.timeframe || frames.indexOf(state.timeframe) < 0) {
-    state.timeframe = frames.indexOf("1m") >= 0 ? "1m" : (frames[0] || null);
-  }
   document.getElementById("timeframes").innerHTML = frames.map((frame) =>
     `<button class="tf-btn ${frame === state.timeframe ? "active" : ""}" type="button" data-tf="${frame}">${frame}</button>`
   ).join("");
   document.querySelectorAll("[data-tf]").forEach((button) => {
-    button.onclick = () => { state.timeframe = button.dataset.tf; loadCandles(); paintSwitchers(); };
+    button.onclick = () => chooseTimeframe(button.dataset.tf);
   });
 }
 function paintSwitchers() {
@@ -779,18 +789,32 @@ function renderWatchlist() {
       <div class="muted">Last scan price ${money(scan.price)}</div>
     </div>`).join("");
   host.querySelectorAll("[data-symbol]").forEach((button) => {
-    button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); renderWatchlist(); };
+    button.onclick = () => chooseSymbol(button.dataset.symbol);
   });
 }
 
-function selectSymbol(symbol) {
-  state.symbol = symbol;
-  renderWatchlist();
+function chooseSymbol(symbol) {
+  const cleaned = cleanSymbol(symbol);
+  if (!cleaned) return;
+  state.symbol = cleaned;
+  saveSelection();
+  refreshDetail();
   renderIdeas(state.explanation || "");
-  renderActions();
-  renderDetail();
   loadCandles();
   paintSwitchers();
+}
+
+function chooseTimeframe(frame) {
+  const cleaned = cleanTimeframe(frame);
+  if (!cleaned) return;
+  state.timeframe = cleaned;
+  saveSelection();
+  loadCandles();
+  paintSwitchers();
+}
+
+function selectSymbol(symbol) {
+  chooseSymbol(symbol);
 }
 
 function renderDetail() {
@@ -1342,8 +1366,75 @@ function scheduleScanFollowUp() {
   }, 2000);
 }
 
+const SELECTION_KEY = "atlas-paper-selection";
 const LAYOUT_KEY = "atlas-paper-layout";
 const TAB_KEY = "atlas-paper-tab";
+
+function cleanSymbol(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9.-]{0,9}$/.test(text)) return null;
+  return text;
+}
+
+function cleanTimeframe(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!/^[0-9]+[mhdw]$/.test(text)) return null;
+  return text;
+}
+
+function rememberedSelection(saved) {
+  const source = saved && typeof saved === "object" ? saved : {};
+  return {
+    symbol: cleanSymbol(source.symbol),
+    timeframe: cleanTimeframe(source.timeframe),
+  };
+}
+
+function resolveSelection(symbol, timeframe, allowed, fallbackSymbols, frames) {
+  const allowedList = [];
+  (allowed || []).forEach((item) => {
+    const cleaned = cleanSymbol(item);
+    if (cleaned && allowedList.indexOf(cleaned) < 0) allowedList.push(cleaned);
+  });
+  const fallback = [];
+  (fallbackSymbols || []).forEach((item) => {
+    const cleaned = cleanSymbol(item);
+    if (cleaned && fallback.indexOf(cleaned) < 0) fallback.push(cleaned);
+  });
+  let nextSymbol = cleanSymbol(symbol);
+  if (allowedList.length && (!nextSymbol || allowedList.indexOf(nextSymbol) < 0)) {
+    nextSymbol = fallback[0] || allowedList[0];
+  }
+  const frameList = [];
+  (frames || []).forEach((item) => {
+    const cleaned = cleanTimeframe(item);
+    if (cleaned && frameList.indexOf(cleaned) < 0) frameList.push(cleaned);
+  });
+  let nextFrame = cleanTimeframe(timeframe);
+  if (frameList.length && (!nextFrame || frameList.indexOf(nextFrame) < 0)) {
+    nextFrame = frameList.indexOf("1m") >= 0 ? "1m" : frameList[0];
+  }
+  return { symbol: nextSymbol, timeframe: nextFrame };
+}
+
+function loadSelection() {
+  try {
+    return rememberedSelection(JSON.parse(localStorage.getItem(SELECTION_KEY) || "null"));
+  } catch (error) {
+    return rememberedSelection(null);
+  }
+}
+
+function saveSelection() {
+  try {
+    localStorage.setItem(SELECTION_KEY, JSON.stringify(rememberedSelection({
+      symbol: state.symbol,
+      timeframe: state.timeframe,
+    })));
+  } catch (error) { /* The choice still applies until this page is closed. */ }
+}
 const LAYOUT_DEFAULTS = { left: 260, right: 320, reader: 380 };
 const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], reader: [280, 640] };
 const TAB_IDS = ["predictions", "investors", "signals", "technicals", "news", "model", "company", "behavior", "risk", "sells", "review"];
@@ -1560,6 +1651,9 @@ chart.addEventListener("mouseleave", () => {
 document.getElementById("refresh-now").onclick = () => {
   refresh(true).catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 };
+const restoredSelection = loadSelection();
+state.symbol = restoredSelection.symbol;
+state.timeframe = restoredSelection.timeframe;
 refresh(false).catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 setInterval(() => { refresh(false).catch(() => {}); }, 20000);
 setInterval(() => {
