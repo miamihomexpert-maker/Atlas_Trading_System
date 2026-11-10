@@ -4,6 +4,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yfinance as yf
 
+from atlas.logger import get_logger
+
+
+logger = get_logger()
+
 
 OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 TIMEFRAME_RULES = {
@@ -28,7 +33,11 @@ _SESSION_CLOSE = (16, 0)
 
 
 def normalize_ohlcv(history):
-    """Return sorted, de-duplicated OHLCV data or raise on invalid bars."""
+    """Return sorted, de-duplicated OHLCV data.
+
+    Invalid bars are dropped. Valid bars are kept. If every bar is invalid,
+    this raises and does not invent a replacement price.
+    """
     if history is None:
         raise ValueError("Market data provider returned no history.")
     if not isinstance(history, pd.DataFrame):
@@ -43,23 +52,23 @@ def normalize_ohlcv(history):
         raise ValueError(f"Market history is missing columns: {sorted(missing)}")
     data = data.loc[:, list(OHLCV_COLUMNS)]
     data = data.apply(pd.to_numeric, errors="coerce")
-    if data.isna().any().any() or data.isin(
+    finite = data.notna().all(axis=1) & ~data.isin(
         [float("inf"), float("-inf")]
-    ).any().any():
-        raise ValueError("Market history contains non-numeric or non-finite OHLCV.")
-    if (
-        (data["Close"] <= 0).any()
-        or (data["Volume"] < 0).any()
-        or (data["High"] < data["Low"]).any()
-        or (data["High"] < data["Open"]).any()
-        or (data["High"] < data["Close"]).any()
-        or (data["Low"] > data["Open"]).any()
-        or (data["Low"] > data["Close"]).any()
-    ):
+    ).any(axis=1)
+    ordered = (
+        data["Close"].gt(0)
+        & data["Volume"].ge(0)
+        & data["High"].ge(data["Low"])
+        & data["High"].ge(data["Open"])
+        & data["High"].ge(data["Close"])
+        & data["Low"].le(data["Open"])
+        & data["Low"].le(data["Close"])
+    )
+    kept = data.loc[finite & ordered]
+    if kept.empty:
         raise ValueError("Market history contains invalid OHLCV bar values.")
-
-    data = data.sort_index()
-    return data.loc[~data.index.duplicated(keep="last")]
+    kept = kept.sort_index()
+    return kept.loc[~kept.index.duplicated(keep="last")]
 
 
 def resample_ohlcv(history, timeframe):
@@ -193,10 +202,18 @@ def _fetch_history(symbol, period, interval):
     normalized_symbol = str(symbol).strip().upper()
     if not normalized_symbol:
         raise ValueError("Instrument symbol is required.")
-    history = yf.Ticker(normalized_symbol).history(period=period, interval=interval)
-    if history.empty:
+    try:
+        history = yf.Ticker(normalized_symbol).history(period=period, interval=interval)
+    except Exception as error:
+        logger.info("%s history fetch skipped: %s", normalized_symbol, error)
         return None
-    return normalize_ohlcv(history)
+    if history is None or getattr(history, "empty", True):
+        return None
+    try:
+        return normalize_ohlcv(history)
+    except (TypeError, ValueError) as error:
+        logger.info("%s history dropped: %s", normalized_symbol, error)
+        return None
 
 
 def get_stock_price(symbol):

@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from atlas.broker import PaperBroker
-from atlas.dashboard import PaperDashboard, describe_scan, make_server
+from atlas.dashboard import PaperDashboard, _state_payload, describe_scan, make_server
 from atlas.database import AtlasDatabase
 from atlas.risk import calculate_position_size
 from atlas.session import run_paper_session
@@ -279,3 +279,59 @@ def test_trade_buttons_are_always_in_the_page_template():
     assert "data-pick=" in page
     assert "No open paper position." in page
     assert "${scan.buyable ? `<button" not in page
+
+
+def test_one_bad_symbol_does_not_blank_dashboard_state(tmp_path, monkeypatch):
+    database = AtlasDatabase(tmp_path / "bad-bar.sqlite3")
+    service = PaperDashboard(
+        token="local-test-token",
+        settings=_settings("AAA", "BBB"),
+        database=database,
+        histories_by_symbol=None,
+        news_events=[],
+        hard_stop=False,
+    )
+
+    def fetch(symbol, timeframes):
+        if symbol == "AAA":
+            raise ValueError("Market history contains invalid OHLCV bar values.")
+        return _bars(100, 1)
+
+    monkeypatch.setattr("atlas.dashboard.fetch_session_histories", fetch)
+    payload = _state_payload(service, force_scan=True)
+
+    assert payload["clock"]["timezone"] == "America/New_York"
+    assert payload["portfolio"]["mode"] == "PAPER"
+    assert payload["portfolio"]["cash"] == 10_000
+    stored = {card["symbol"]: card for card in database.list_symbol_scans()}
+    assert stored["AAA"]["decision"] == "NO_DATA"
+    assert "invalid OHLCV" in stored["AAA"]["reason"]
+    assert stored["BBB"]["symbol"] == "BBB"
+    assert payload["scans"]
+    database.close()
+
+
+def test_paper_loop_continues_after_one_bad_history(tmp_path, monkeypatch):
+    database = AtlasDatabase(tmp_path / "loop-bad.sqlite3")
+    broker = PaperBroker(initial_cash=10_000, database=database)
+
+    def fetch(symbol, timeframes):
+        if symbol == "AAA":
+            raise ValueError("Market history contains invalid OHLCV bar values.")
+        return _bars(100, 1)
+
+    monkeypatch.setattr("atlas.session.fetch_session_histories", fetch)
+    summary = run_paper_session(
+        settings=_settings("AAA", "BBB"),
+        broker=broker,
+        database=database,
+        news_events=[],
+        approved=False,
+        timeframes=("1h", "1d"),
+    )
+
+    symbols = [item["symbol"] for item in summary["results"]]
+    assert "AAA" in symbols
+    assert "BBB" in symbols
+    assert summary["live_trading"] is False
+    database.close()
