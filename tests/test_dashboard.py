@@ -394,7 +394,7 @@ def test_minute_chart_is_display_only(tmp_path, monkeypatch):
 
 def test_chart_poll_does_not_scan_and_news_text_is_readable():
     page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
-    assert 'name="atlas-dashboard-version" content="22"' in page
+    assert 'name="atlas-dashboard-version" content="23"' in page
     assert "const CHART_REFRESH_MS = 15000;" in page
     start = page.index("if (!sessionStillOpen()) return;")
     block = page[start:page.index("CHART_REFRESH_MS);", start)]

@@ -19,11 +19,18 @@ from atlas.technical import calculate_ema, calculate_rsi, calculate_sma
 from atlas.baseline import auto_train_enabled, ensure_baseline_model
 from atlas.company import describe_company, profile_for_symbol, resolve_company_loader
 from atlas.learning import (
+    build_prediction,
     describe_behavior,
+    evaluate_prediction_gate,
+    grade_prediction_outcomes,
+    ohlc_bars,
+    prediction_reference,
     remember_outcomes,
     remember_public,
     resolve_behavior_loader,
     stamp_learning_bias,
+    assess_track_record,
+    investor_audit_rows,
 )
 from atlas.news import http_url, yahoo_profile_url, yahoo_quote_url
 from atlas.news_feed import resolve_news
@@ -175,7 +182,13 @@ class PaperDashboard:
             self._companies[symbol] = profile_for_symbol(symbol, self.company_loader)
         return self._companies[symbol]
 
-    def _described(self, card):
+    def _described(self, card, histories=None):
+        if histories is None:
+            try:
+                histories = self._histories(card.get("symbol"))
+            except Exception as error:
+                logger.info("%s history skipped while describing: %s", card.get("symbol"), error)
+                histories = None
         card["name"] = self._instrument_name(card["symbol"])
         card["company"] = self._company_profile(card["symbol"])
         card["company_copy"] = describe_company(card["company"])
@@ -183,7 +196,112 @@ class PaperDashboard:
         card["links"] = _outbound_links(card)
         card["copy"] = describe_scan(card)
         card["behavior"] = self._behavior_for(card["symbol"])
+        news = card.get("news") or {}
+        card["prediction"] = self._prediction_for(
+            card["symbol"],
+            histories,
+            news_items=news.get("items") or [],
+        )
         return card
+
+    def _prediction_for(self, symbol, histories, news_items=None):
+        symbol = str(symbol).strip().upper()
+        bars = ohlc_bars(histories)
+        try:
+            events = self.database.list_learning_events(symbol)
+        except Exception as error:
+            logger.info("%s prediction read failed: %s", symbol, error)
+            events = []
+        for outcome in grade_prediction_outcomes(events, bars):
+            try:
+                self.database.record_learning_event(
+                    symbol,
+                    outcome["source"],
+                    outcome["source_key"],
+                    outcome["summary"],
+                    outcome["detail"],
+                    outcome["effect"],
+                )
+            except Exception as error:
+                logger.info("%s prediction grade skipped: %s", symbol, error)
+        try:
+            events = self.database.list_learning_events(symbol)
+        except Exception as error:
+            logger.info("%s prediction reread failed: %s", symbol, error)
+            events = []
+        prediction = build_prediction(symbol, events, bars, news_items=news_items)
+        reference = prediction_reference(prediction)
+        try:
+            if reference is not None:
+                self.database.record_learning_event(
+                    symbol,
+                    reference["source"],
+                    reference["source_key"],
+                    reference["summary"],
+                    reference["detail"],
+                    reference["effect"],
+                )
+            else:
+                self.database.record_learning_event(
+                    symbol,
+                    "prediction_insufficient",
+                    "insufficient",
+                    prediction.get("lead") or "Not enough public data.",
+                    {"status": prediction.get("status"), "direction": prediction.get("direction")},
+                    "none",
+                )
+        except Exception as error:
+            logger.info("%s prediction record skipped: %s", symbol, error)
+        broker = self._broker()
+        account = broker.account_info()
+        daily = broker.daily_pnl()
+        try:
+            halted = not validate_daily_loss(account["equity"], daily)
+        except (TypeError, ValueError):
+            halted = True
+        position = broker.positions().get(symbol)
+        has_long = bool(position) and position.get("side", "LONG") != "SHORT" and position.get("quantity", 0) > 0
+        gate = evaluate_prediction_gate(
+            prediction,
+            equity=account["equity"],
+            exposure=broker.current_exposure(),
+            daily_pnl=daily,
+            halted=halted,
+            has_long=has_long,
+        )
+        try:
+            self.database.record_learning_event(
+                symbol,
+                "prediction_gate",
+                gate["source_key"],
+                gate["reason"],
+                gate["audit"],
+                gate["effect"],
+            )
+        except Exception as error:
+            logger.info("%s prediction gate record skipped: %s", symbol, error)
+        try:
+            overall = [
+                event for event in self.database.list_learning_events()
+                if event.get("source") == "prediction_outcome"
+            ]
+        except Exception:
+            overall = []
+        prediction["gate"] = gate
+        prediction["overall_track_record"] = assess_track_record(overall)
+        for row in investor_audit_rows(prediction.get("investors")):
+            try:
+                self.database.record_learning_event(
+                    symbol,
+                    row["source"],
+                    row["source_key"],
+                    row["summary"],
+                    row["detail"],
+                    row["effect"],
+                )
+            except Exception as error:
+                logger.info("%s investor record skipped: %s", symbol, error)
+        return prediction
 
     def _learn(self, symbol, histories):
         try:
@@ -413,7 +531,7 @@ class PaperDashboard:
             card = _scan_card(symbol, preview, broker)
             self._record_observation(card, histories)
             self._learn(symbol, histories)
-            card = self._described(card)
+            card = self._described(card, histories)
             scans.append(card)
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
@@ -497,7 +615,7 @@ class PaperDashboard:
             card = _scan_card(symbol, preview, broker)
             self._record_observation(card, histories)
             self._learn(symbol, histories)
-            card = self._described(card)
+            card = self._described(card, histories)
             self.database.upsert_symbol_scan(symbol, card)
         stored = {card["symbol"] for card in self.database.list_symbol_scans()}
         self.database.set_metadata(
@@ -628,12 +746,7 @@ class PaperDashboard:
         preview = self._preview(normalized, broker, histories)
         recommendation = preview.get("recommendation")
         if preview.get("decision") != "BUY" or not recommendation:
-            self._audit(
-                "DASHBOARD_BUY_REJECTED",
-                normalized,
-                {"reason": preview.get("decision")},
-            )
-            raise ValueError(f"{normalized} is not a current BUY recommendation.")
+            return self._buy_from_prediction_gate(normalized, broker, histories, clicked_at)
         limits = RiskLimits()
         sized = calculate_position_size(
             broker.account_info()["equity"],
@@ -701,6 +814,70 @@ class PaperDashboard:
                 "effect": order.get("effect"),
                 "position": "SHORT",
             },
+        )
+        return {"ok": True, "order": _public_order(order)}
+
+    def _buy_from_prediction_gate(self, symbol, broker, histories, clicked_at):
+        """Paper long from a passing prediction record. The scan decision is not rewritten."""
+        self._learn(symbol, histories)
+        prediction = self._prediction_for(symbol, histories)
+        gate = prediction.get("gate") or {}
+        audit = dict(gate.get("audit") or {})
+        audit["clicked_at"] = clicked_at
+        audit["scan_decision_unchanged"] = True
+        if not gate.get("allow_buy"):
+            self._audit("PREDICTION_GATE_BLOCKED", symbol, audit)
+            reason = gate.get("reason") or "The prediction gate did not enable a buy."
+            if gate.get("halted"):
+                raise PermissionError(reason)
+            if audit.get("quantity", 0) <= 0 and prediction.get("direction") == "up" and (prediction.get("track_record") or {}).get("passed"):
+                raise PermissionError("Risk limits permit no shares.")
+            raise ValueError(f"{symbol} is not a current BUY recommendation. {reason}")
+        signal = {
+            "instrument": symbol,
+            "direction": "BUY",
+            "entry_price": gate.get("entry"),
+            "stop_loss": gate.get("stop"),
+            "profit_target": gate.get("target"),
+            "market_timestamp": gate.get("time"),
+            "explanation": "Paper buy from the prediction gate. The scan decision was not changed.",
+        }
+        limits = RiskLimits()
+        try:
+            sized = calculate_position_size(
+                broker.account_info()["equity"],
+                signal["entry_price"],
+                signal["stop_loss"],
+                limits,
+                current_exposure=broker.current_exposure(),
+            )
+        except (TypeError, ValueError):
+            sized = 0
+        if sized <= 0:
+            audit["quantity"] = 0
+            self._audit("PREDICTION_GATE_BLOCKED", symbol, audit)
+            raise PermissionError("Risk limits permit no shares.")
+        try:
+            order = execute_paper_signal(
+                signal,
+                broker,
+                f"dash-predict-{symbol}-{uuid.uuid4().hex[:12]}",
+                approved=True,
+                limits=limits,
+                max_data_age_seconds=self.settings.max_market_data_age_seconds,
+                approval_database=self.database,
+            )
+        except PermissionError as error:
+            audit["reason"] = str(error)
+            self._audit("PREDICTION_GATE_BLOCKED", symbol, audit)
+            raise
+        audit["order_id"] = order["order_id"]
+        audit["quantity"] = order["quantity"]
+        self._audit("PREDICTION_GATE_ALLOWED", symbol, audit)
+        self._audit(
+            "DASHBOARD_BUY_FILLED",
+            symbol,
+            {"clicked_at": clicked_at, "order_id": order["order_id"], "quantity": order["quantity"], "source": "prediction_gate"},
         )
         return {"ok": True, "order": _public_order(order)}
 

@@ -254,7 +254,7 @@ def test_opposing_news_cannot_turn_a_wait_into_a_short():
 
 def test_page_copy_names_a_short_and_a_cover():
     page = open("atlas/dashboard_page.html", encoding="utf-8").read()
-    assert 'content="22"' in page
+    assert 'content="23"' in page
     assert "Buy covers the open paper short" in page
     assert "Sell opens a paper short" in page
     assert "does not open a short" in page
