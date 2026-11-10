@@ -335,3 +335,73 @@ def test_paper_loop_continues_after_one_bad_history(tmp_path, monkeypatch):
     assert "BBB" in symbols
     assert summary["live_trading"] is False
     database.close()
+
+
+def test_minute_chart_is_display_only(tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_TIMEFRAMES", raising=False)
+    frame = recent_history(100, 1)
+    periods = {}
+
+    def history(symbol, period, interval):
+        periods[interval] = period
+        return frame
+
+    monkeypatch.setattr("atlas.market_data.get_stock_history", history)
+    from atlas.session import fetch_session_histories
+
+    fetched = fetch_session_histories("XYZ", ("1m", "1h"))
+    assert set(fetched) == {"1m", "1h"}
+    assert periods["1m"] == "5d"
+    assert periods["1h"] == "1mo"
+    service, database = _service(tmp_path, {"XYZ": {"1h": frame, "1d": frame.copy()}})
+    calls = []
+
+    def fetch(symbol, timeframes):
+        calls.append((symbol, tuple(timeframes)))
+        return {"1m": frame}
+
+    monkeypatch.setattr("atlas.dashboard.fetch_session_histories", fetch)
+    service.candle_loader = None
+    payload = service.candles("XYZ", "1m")
+
+    assert service.timeframes == ("1h", "1d")
+    assert "1m" not in service.portfolio()["timeframes"]
+    assert service.chart_timeframes() == ["1m", "1h", "1d"]
+    assert calls == [("XYZ", ("1m",))]
+    assert payload["chart_only"] is True
+    assert payload["refresh_seconds"] == 15
+    assert payload["error"] is None
+    assert payload["candles"][-1]["close"] == frame["Close"].iloc[-1]
+    assert "not a tick stream" in payload["feed_note"]
+    with pytest.raises(ValueError, match="not available"):
+        service.candles("XYZ", "5m")
+
+    def fail(symbol, timeframes):
+        raise ValueError("Market history contains invalid OHLCV bar values.")
+
+    monkeypatch.setattr("atlas.dashboard.fetch_session_histories", fail)
+    failed = service.candles("XYZ", "1m")
+    assert failed["candles"] == []
+    assert "invalid OHLCV" in failed["error"]
+    assert service.timeframes == ("1h", "1d")
+    state = _state_payload(service)
+    assert state["chart_timeframes"] == ["1m", "1h", "1d"]
+    assert state["chart_refresh_seconds"] == 15
+    assert state["portfolio"]["timeframes"] == ["1h", "1d"]
+    assert state["clock"]["timezone"] == "America/New_York"
+    database.close()
+
+
+def test_chart_poll_does_not_scan_and_news_text_is_readable():
+    page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
+    assert 'name="atlas-dashboard-version" content="21"' in page
+    assert "const CHART_REFRESH_MS = 15000;" in page
+    start = page.index("if (!sessionStillOpen()) return;")
+    block = page[start:page.index("CHART_REFRESH_MS);", start)]
+    assert "loadCandles({ live: true })" in block
+    assert "scan=1" not in block
+    assert "/api/state" not in block
+    assert "#news a { color: #ffd56a; text-decoration: underline; }" in page
+    assert "#news h3, #news p, #news .clip { color: #f7fbff; }" in page
+    assert "#news .muted { color: #d7e4ef; }" in page
+    assert "TOP 3 SCAN CANDIDATES" in page

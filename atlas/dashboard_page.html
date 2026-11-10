@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="20">
+<meta name="atlas-dashboard-version" content="21">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -106,6 +106,18 @@
   .clip img, .clip video { display: block; max-width: 100%; height: auto; margin: 6px 0; }
   .clip h3 { margin: 0 0 4px; font-size: 15px; }
   .clip a { color: #9adfff; }
+  #news {
+    color: #f7fbff;
+    background: rgba(4, 10, 18, 0.72);
+    padding: 8px 10px;
+  }
+  #news h2 { color: #ffffff; }
+  #news h2.decision.BUY { color: var(--up); }
+  #news h2.decision.SELL { color: var(--down); }
+  #news h2.decision.WAIT, #news h2.decision.NO_DATA { color: var(--amber); }
+  #news h3, #news p, #news .clip { color: #f7fbff; }
+  #news a { color: #ffd56a; text-decoration: underline; }
+  #news .muted { color: #d7e4ef; }
   .splitter[hidden] { display: none; }
   .splitter {
     flex: 0 0 10px;
@@ -265,7 +277,8 @@
 </div>
 <script>
 const TOKEN = "__ATLAS_LOCAL_TOKEN__";
-const state = { symbol: null, timeframe: null, scans: [], hoverIndex: null, chart: null, clock: null, clockFetchedAt: 0 };
+const state = { symbol: null, timeframe: null, chartTimeframes: [], scans: [], hoverIndex: null, chart: null, clock: null, clockFetchedAt: 0, pointer: null };
+const CHART_REFRESH_MS = 15000;
 const chart = document.getElementById("chart");
 
 function money(value) {
@@ -555,23 +568,58 @@ function renderHover(bar) {
   ].join(" · ");
 }
 
-async function loadCandles() {
+let candlesBusy = false;
+function sessionStillOpen() {
+  const clock = state.clock;
+  if (!clock || !clock.is_open) return false;
+  const remaining = Number(clock.seconds_until_next);
+  if (!Number.isFinite(remaining)) return true;
+  return Date.now() - (state.clockFetchedAt || 0) < remaining * 1000;
+}
+async function loadCandles(options) {
+  const live = !!(options && options.live);
   const note = document.getElementById("chart-note");
   if (!state.symbol || !state.timeframe) return;
-  const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
-  const payload = await response.json();
-  state.hoverIndex = null;
-  state.indicators = payload.indicators || null;
-  drawCandles(payload.candles || []);
-  renderHover(null);
-  const count = (payload.candles || []).length;
-  const indicators = payload.indicators;
-  const legend = indicators
-    ? `SMA ${indicators.sma} and EMA ${indicators.ema} are calculated from these bars. RSI ${indicators.rsi} is the lower panel.`
-    : "Indicator periods were not returned.";
-  note.textContent = payload.error
-    ? `${payload.error} ${legend}`
-    : `${payload.symbol} ${payload.timeframe} · ${count} bars from the market-data feed. ${legend}`;
+  if (live && candlesBusy) return;
+  const previousHover = state.hoverIndex;
+  const watchingLast = live && state.chart && previousHover === state.chart.candles.length - 1;
+  candlesBusy = true;
+  try {
+    const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      note.textContent = payload.error || "Chart request failed.";
+      return;
+    }
+    const candles = payload.candles || [];
+    state.indicators = payload.indicators || null;
+    if (live && previousHover !== null) {
+      state.hoverIndex = watchingLast ? Math.max(0, candles.length - 1) : (candles[previousHover] ? previousHover : null);
+      if (!candles.length) state.hoverIndex = null;
+    } else {
+      state.hoverIndex = null;
+    }
+    drawCandles(candles);
+    const hovered = state.hoverIndex !== null ? candles[state.hoverIndex] : null;
+    renderHover(hovered);
+    if (hovered && state.pointer) showTooltip(hovered, state.pointer);
+    else if (!live) hideTooltip();
+    const indicators = payload.indicators;
+    const legend = indicators
+      ? `SMA ${indicators.sma} and EMA ${indicators.ema} are calculated from these bars. RSI ${indicators.rsi} is the lower panel.`
+      : "Indicator periods were not returned.";
+    const parts = [];
+    if (payload.error) parts.push(payload.error);
+    if (payload.symbol || payload.timeframe) parts.push(`${payload.symbol || ""} ${payload.timeframe || ""}`.trim());
+    if (candles.length) parts.push(`${candles.length} bars from the market-data feed.`);
+    if (payload.chart_only) parts.push(`${payload.timeframe} is chart display only. Buy and sell still use the decision timeframes.`);
+    if (payload.refresh_seconds) parts.push(`This symbol's chart reloads every ${payload.refresh_seconds} seconds while the regular session is open.`);
+    if (payload.feed_note) parts.push(payload.feed_note);
+    parts.push(legend);
+    note.textContent = parts.join(" ");
+  } finally {
+    candlesBusy = false;
+  }
 }
 
 function selectedScan() {
@@ -617,8 +665,10 @@ function renderSwitchers(portfolio) {
   document.querySelectorAll("[data-symbol]").forEach((button) => {
     button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
   });
-  const frames = portfolio.timeframes || [];
-  if (!state.timeframe && frames.length) state.timeframe = frames[0];
+  const frames = state.chartTimeframes.length ? state.chartTimeframes : (portfolio.timeframes || []);
+  if (!state.timeframe || frames.indexOf(state.timeframe) < 0) {
+    state.timeframe = frames.indexOf("1m") >= 0 ? "1m" : (frames[0] || null);
+  }
   document.getElementById("timeframes").innerHTML = frames.map((frame) =>
     `<button class="tf-btn ${frame === state.timeframe ? "active" : ""}" type="button" data-tf="${frame}">${frame}</button>`
   ).join("");
@@ -1013,6 +1063,7 @@ async function refresh(forceScan) {
   state.positions = (payload.portfolio && payload.portfolio.positions) || [];
   state.clock = payload.clock || null;
   state.clockFetchedAt = Date.now();
+  state.chartTimeframes = payload.chart_timeframes || [];
   renderSwitchers(payload.portfolio);
   renderPortfolio(payload.portfolio);
   renderRisk(payload.portfolio);
@@ -1218,6 +1269,7 @@ if (window.ResizeObserver) {
 }
 
 chart.addEventListener("mousemove", (event) => {
+  state.pointer = event;
   const layout = state.chart;
   if (!layout || !layout.candles.length || !layout.slot) return;
   const rect = chart.getBoundingClientRect();
@@ -1231,6 +1283,7 @@ chart.addEventListener("mousemove", (event) => {
   showTooltip(bar, event);
 });
 chart.addEventListener("mouseleave", () => {
+  state.pointer = null;
   state.hoverIndex = null;
   if (state.chart) drawCandles(state.chart.candles);
   renderHover(null);
@@ -1241,6 +1294,10 @@ document.getElementById("refresh-now").onclick = () => {
 };
 refresh(false).catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 setInterval(() => { refresh(false).catch(() => {}); }, 20000);
+setInterval(() => {
+  if (!sessionStillOpen()) return;
+  loadCandles({ live: true }).catch(() => {});
+}, CHART_REFRESH_MS);
 setInterval(renderClock, 1000);
 </script>
 </body>

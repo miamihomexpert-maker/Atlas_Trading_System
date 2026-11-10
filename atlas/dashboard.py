@@ -37,6 +37,35 @@ from config.settings import load_settings
 
 logger = get_logger()
 _PAGE = (Path(__file__).with_name("dashboard_page.html")).read_text(encoding="utf-8")
+# Short bars for the chart. They are not added to the decision timeframes.
+CHART_ONLY_TIMEFRAMES = ("1m",)
+CHART_REFRESH_SECONDS = 15
+_CHART_FEED_NOTE = (
+    "These bars come from the market-data feed. "
+    "The feed is not a tick stream and can be delayed. "
+    "No prices are filled in."
+)
+
+
+def _chart_timeframes(service):
+    try:
+        return list(service.chart_timeframes())
+    except Exception as error:
+        logger.info("Chart timeframes unavailable: %s", error)
+        return list(CHART_ONLY_TIMEFRAMES)
+
+
+def _chart_result(symbol, timeframe, candles, error, chart_only):
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "candles": candles,
+        "indicators": {"sma": 20, "ema": 20, "rsi": 14} if candles else None,
+        "chart_only": chart_only,
+        "refresh_seconds": CHART_REFRESH_SECONDS,
+        "feed_note": _CHART_FEED_NOTE,
+        "error": error,
+    }
 
 
 class PaperDashboard:
@@ -82,6 +111,14 @@ class PaperDashboard:
         self._companies = {}
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
+
+    def chart_timeframes(self):
+        """Decision timeframes plus display-only intervals. Order is the chart tabs."""
+        frames = []
+        for name in CHART_ONLY_TIMEFRAMES + tuple(self.timeframes):
+            if name not in frames:
+                frames.append(name)
+        return frames
 
     @property
     def database(self):
@@ -453,20 +490,27 @@ class PaperDashboard:
         allowed = set(self.settings.instruments) | set(self._broker().positions())
         if normalized not in allowed:
             raise ValueError("Symbol is not on the watchlist or in the paper book.")
-        if timeframe not in self.timeframes:
-            raise ValueError("Timeframe is not configured.")
-        if self.candle_loader is not None:
-            frame = self.candle_loader(normalized, timeframe)
-        else:
-            histories = fetch_session_histories(normalized, (timeframe,))
-            frame = histories.get(timeframe) if histories else None
+        requested = str(timeframe).strip()
+        if requested not in self.chart_timeframes():
+            raise ValueError("Timeframe is not available for the chart.")
+        chart_only = requested not in self.timeframes
+        try:
+            if self.candle_loader is not None:
+                frame = self.candle_loader(normalized, requested)
+            else:
+                histories = fetch_session_histories(normalized, (requested,))
+                frame = histories.get(requested) if histories else None
+        except Exception as error:
+            logger.info("%s %s chart bars skipped: %s", normalized, requested, error)
+            return _chart_result(normalized, requested, [], str(error), chart_only)
         if frame is None or getattr(frame, "empty", True):
-            return {
-                "symbol": normalized,
-                "timeframe": timeframe,
-                "candles": [],
-                "error": "No bars returned for this symbol and timeframe.",
-            }
+            return _chart_result(
+                normalized,
+                requested,
+                [],
+                "No bars returned for this symbol and timeframe.",
+                chart_only,
+            )
         shown = frame.tail(300)
         sma = calculate_sma(shown)
         ema = calculate_ema(shown)
@@ -485,13 +529,7 @@ class PaperDashboard:
                 "ema": _finite_number(ema.iloc[offset]),
                 "rsi": _finite_number(rsi.iloc[offset]),
             })
-        return {
-            "symbol": normalized,
-            "timeframe": timeframe,
-            "candles": candles,
-            "indicators": {"sma": 20, "ema": 20, "rsi": 14},
-            "error": None,
-        }
+        return _chart_result(normalized, requested, candles, None, chart_only)
 
     def buy(self, token, symbol):
         self._guard(token)
@@ -1070,6 +1108,8 @@ def _state_payload(service, force_scan=False):
         "alerts": alerts,
         "clock": clock,
         "review": review,
+        "chart_timeframes": _chart_timeframes(service),
+        "chart_refresh_seconds": CHART_REFRESH_SECONDS,
     }
 
 
