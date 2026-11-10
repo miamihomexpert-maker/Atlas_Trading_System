@@ -240,7 +240,12 @@ def test_dashboard_buy_list_stays_empty_when_nothing_qualifies(tmp_path):
     assert by_symbol["ABC"]["buyable"] is False
     assert by_symbol["XYZ"]["reason"]
     assert by_symbol["XYZ"]["timeframes"]
-    assert by_symbol["XYZ"]["entry"] is None
+    if by_symbol["XYZ"]["decision"] == "SELL":
+        assert by_symbol["XYZ"]["shortable"] is True
+        assert isinstance(by_symbol["XYZ"]["entry"], float)
+    else:
+        assert by_symbol["XYZ"]["entry"] is None
+        assert by_symbol["XYZ"]["shortable"] is False
     database.close()
 
 

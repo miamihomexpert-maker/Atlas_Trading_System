@@ -16,6 +16,8 @@ from config.settings import load_settings
 logger = get_logger()
 
 _TIMEFRAME_PERIODS = {
+    # 1m is chart display only. Decision timeframes stay on ATLAS_TIMEFRAMES.
+    "1m": "5d",
     "5m": "5d",
     "15m": "5d",
     "30m": "1mo",
@@ -236,14 +238,13 @@ def _run_symbol(
             news_report=news_report,
             execute=not manual_exits if execute is None else execute,
         )
-        if (
-            manual_exits
-            and result.get("decision") == "SELL"
-            and str(symbol).strip().upper() in broker.positions()
-        ):
+        normalized_symbol = str(symbol).strip().upper()
+        held = broker.positions().get(normalized_symbol)
+        held_side = None if held is None else held.get("side", "LONG")
+        if manual_exits and result.get("decision") == "SELL" and held_side == "LONG":
             quote = _latest_quote(histories)
             price = quote[1] if quote else (result.get("recommendation") or {}).get("entry_price")
-            position = broker.positions().get(str(symbol).strip().upper(), {})
+            position = held or {}
             _stage_exit_alert(
                 database,
                 symbol,
@@ -254,6 +255,24 @@ def _run_symbol(
                 (result.get("recommendation") or {}).get("explanation")
                 or result.get("analysis", {}).get("reason")
                 or "Technical decision is SELL.",
+            )
+            result["exit_reason"] = "opposing"
+            result["execution"] = "RECOMMENDED"
+            result["order"] = None
+        elif manual_exits and result.get("decision") == "BUY" and held_side == "SHORT":
+            quote = _latest_quote(histories)
+            price = quote[1] if quote else (result.get("recommendation") or {}).get("entry_price")
+            _stage_exit_alert(
+                database,
+                symbol,
+                "opposing",
+                price,
+                (held or {}).get("stop_loss"),
+                (held or {}).get("profit_target"),
+                (result.get("recommendation") or {}).get("explanation")
+                or result.get("analysis", {}).get("reason")
+                or "Technical decision is BUY. Buy covers the paper short.",
+                action="cover",
             )
             result["exit_reason"] = "opposing"
             result["execution"] = "RECOMMENDED"
@@ -696,11 +715,21 @@ def _protective_exit(
     broker.update_market_price(normalized, price)
     if not has_plan:
         return None
-    if price <= position["stop_loss"]:
+    short = position.get("side") == "SHORT"
+    if short:
+        if price >= position["stop_loss"]:
+            reason = "stop"
+        elif price <= position["profit_target"]:
+            reason = "target"
+        else:
+            reason = None
+    elif price <= position["stop_loss"]:
         reason = "stop"
     elif price >= position["profit_target"]:
         reason = "target"
     else:
+        reason = None
+    if reason is None:
         if manual_exits:
             _clear_exit_alert(database, normalized, "stop")
             _clear_exit_alert(database, normalized, "target")
@@ -716,17 +745,21 @@ def _protective_exit(
             (
                 f"Latest close {price:.4f} is at or through the stored {reason} "
                 f"({position.get('stop_loss') if reason == 'stop' else position.get('profit_target')})."
+                + (" Buy covers the paper short." if short else "")
             ),
+            action="cover" if short else "sell",
         )
         return {
             "symbol": normalized,
-            "decision": "SELL",
+            "decision": "SELL" if not short else "BUY",
             "order": None,
             "execution": "RECOMMENDED",
             "exit_reason": reason,
             "alert_id": alert_id,
         }
-    signal = _exit_signal(normalized, price, market_timestamp)
+    signal = _cover_signal(normalized, price, market_timestamp) if short else _exit_signal(
+        normalized, price, market_timestamp
+    )
     try:
         if _remote_approval_required(require_remote_approval):
             raise PermissionError("Remote approval token is required.")
@@ -815,12 +848,29 @@ def _exit_signal(symbol, price, market_timestamp):
     }
 
 
+def _cover_signal(symbol, price, market_timestamp):
+    return {
+        "instrument": symbol,
+        "direction": "BUY",
+        "entry_price": float(price),
+        "stop_loss": float(price) * 0.99,
+        "profit_target": float(price) * 1.01,
+        "market_timestamp": market_timestamp,
+        "explanation": "Paper cover of the open short at the latest observed price.",
+    }
+
+
 def _notify_cycle(results):
     halt_noted = False
     for item in results:
         order = item.get("order")
         if order and order.get("status") == "FILLED":
-            verb = "opened" if order.get("side") == "BUY" else "closed"
+            verb = {
+                "OPEN_LONG": "opened long",
+                "CLOSE_LONG": "closed long",
+                "OPEN_SHORT": "opened short",
+                "CLOSE_SHORT": "covered short",
+            }.get(order.get("effect"), "filled")
             _notify(
                 f"Atlas paper {verb} {order.get('symbol')} {order.get('side')} "
                 f"{order.get('quantity')} @ {order.get('price')}"
@@ -830,7 +880,16 @@ def _notify_cycle(results):
             _notify("Atlas paper trading halted: daily loss limit reached.")
 
 
-def _stage_exit_alert(database, symbol, reason, price, stop_loss, profit_target, message):
+def _stage_exit_alert(
+    database,
+    symbol,
+    reason,
+    price,
+    stop_loss,
+    profit_target,
+    message,
+    action="sell",
+):
     if database is None or not hasattr(database, "upsert_exit_alert"):
         return None
     return database.upsert_exit_alert(
@@ -842,6 +901,7 @@ def _stage_exit_alert(database, symbol, reason, price, stop_loss, profit_target,
         {
             "message": message,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action,
         },
     )
 

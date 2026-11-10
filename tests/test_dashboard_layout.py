@@ -79,7 +79,8 @@ def test_page_keeps_the_chart_and_trade_buttons_outside_the_tabs():
     assert "trade-actions" not in reader_html
     assert 'id="action-buy"' in page
     assert 'id="action-sell"' in page
-    assert 'scan.buyable ? "" : "disabled"' in page
+    assert 'buyOn ? "" : "disabled"' in page
+    assert 'sellOn ? "" : "disabled"' in page
     assert "No open paper position." in page
     assert "function decisionClass" in page
     assert 'decision === "BUY"' in page

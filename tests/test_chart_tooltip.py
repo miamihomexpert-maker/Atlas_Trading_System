@@ -56,4 +56,5 @@ def test_page_has_the_floating_tooltip_and_cache_version():
     assert "hideTooltip" in page
     assert "bar.volume || 0" not in page
     assert "bar.open || 0" not in page
-    assert 'scan.buyable ? "" : "disabled"' in page
+    assert 'buyOn ? "" : "disabled"' in page
+    assert 'sellOn ? "" : "disabled"' in page

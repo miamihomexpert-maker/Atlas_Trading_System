@@ -106,6 +106,18 @@
   .clip img, .clip video { display: block; max-width: 100%; height: auto; margin: 6px 0; }
   .clip h3 { margin: 0 0 4px; font-size: 15px; }
   .clip a { color: #9adfff; }
+  #news {
+    color: #f7fbff;
+    background: rgba(4, 10, 18, 0.72);
+    padding: 8px 10px;
+  }
+  #news h2 { color: #ffffff; }
+  #news h2.decision.BUY { color: var(--up); }
+  #news h2.decision.SELL { color: var(--down); }
+  #news h2.decision.WAIT, #news h2.decision.NO_DATA { color: var(--amber); }
+  #news h3, #news p, #news .clip { color: #f7fbff; }
+  #news a { color: #ffd56a; text-decoration: underline; }
+  #news .muted { color: #d7e4ef; }
   #behavior {
     color: #f7fbff;
     background: rgba(4, 10, 18, 0.72);
@@ -279,7 +291,8 @@
 </div>
 <script>
 const TOKEN = "__ATLAS_LOCAL_TOKEN__";
-const state = { symbol: null, timeframe: null, scans: [], hoverIndex: null, chart: null, clock: null, clockFetchedAt: 0 };
+const state = { symbol: null, timeframe: null, chartTimeframes: [], scans: [], hoverIndex: null, chart: null, clock: null, clockFetchedAt: 0, pointer: null };
+const CHART_REFRESH_MS = 15000;
 const chart = document.getElementById("chart");
 
 function money(value) {
@@ -569,23 +582,58 @@ function renderHover(bar) {
   ].join(" · ");
 }
 
-async function loadCandles() {
+let candlesBusy = false;
+function sessionStillOpen() {
+  const clock = state.clock;
+  if (!clock || !clock.is_open) return false;
+  const remaining = Number(clock.seconds_until_next);
+  if (!Number.isFinite(remaining)) return true;
+  return Date.now() - (state.clockFetchedAt || 0) < remaining * 1000;
+}
+async function loadCandles(options) {
+  const live = !!(options && options.live);
   const note = document.getElementById("chart-note");
   if (!state.symbol || !state.timeframe) return;
-  const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
-  const payload = await response.json();
-  state.hoverIndex = null;
-  state.indicators = payload.indicators || null;
-  drawCandles(payload.candles || []);
-  renderHover(null);
-  const count = (payload.candles || []).length;
-  const indicators = payload.indicators;
-  const legend = indicators
-    ? `SMA ${indicators.sma} and EMA ${indicators.ema} are calculated from these bars. RSI ${indicators.rsi} is the lower panel.`
-    : "Indicator periods were not returned.";
-  note.textContent = payload.error
-    ? `${payload.error} ${legend}`
-    : `${payload.symbol} ${payload.timeframe} · ${count} bars from the market-data feed. ${legend}`;
+  if (live && candlesBusy) return;
+  const previousHover = state.hoverIndex;
+  const watchingLast = live && state.chart && previousHover === state.chart.candles.length - 1;
+  candlesBusy = true;
+  try {
+    const response = await fetch(`/api/candles?symbol=${encodeURIComponent(state.symbol)}&timeframe=${encodeURIComponent(state.timeframe)}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      note.textContent = payload.error || "Chart request failed.";
+      return;
+    }
+    const candles = payload.candles || [];
+    state.indicators = payload.indicators || null;
+    if (live && previousHover !== null) {
+      state.hoverIndex = watchingLast ? Math.max(0, candles.length - 1) : (candles[previousHover] ? previousHover : null);
+      if (!candles.length) state.hoverIndex = null;
+    } else {
+      state.hoverIndex = null;
+    }
+    drawCandles(candles);
+    const hovered = state.hoverIndex !== null ? candles[state.hoverIndex] : null;
+    renderHover(hovered);
+    if (hovered && state.pointer) showTooltip(hovered, state.pointer);
+    else if (!live) hideTooltip();
+    const indicators = payload.indicators;
+    const legend = indicators
+      ? `SMA ${indicators.sma} and EMA ${indicators.ema} are calculated from these bars. RSI ${indicators.rsi} is the lower panel.`
+      : "Indicator periods were not returned.";
+    const parts = [];
+    if (payload.error) parts.push(payload.error);
+    if (payload.symbol || payload.timeframe) parts.push(`${payload.symbol || ""} ${payload.timeframe || ""}`.trim());
+    if (candles.length) parts.push(`${candles.length} bars from the market-data feed.`);
+    if (payload.chart_only) parts.push(`${payload.timeframe} is chart display only. Buy and sell still use the decision timeframes.`);
+    if (payload.refresh_seconds) parts.push(`This symbol's chart reloads every ${payload.refresh_seconds} seconds while the regular session is open.`);
+    if (payload.feed_note) parts.push(payload.feed_note);
+    parts.push(legend);
+    note.textContent = parts.join(" ");
+  } finally {
+    candlesBusy = false;
+  }
 }
 
 function selectedScan() {
@@ -631,8 +679,10 @@ function renderSwitchers(portfolio) {
   document.querySelectorAll("[data-symbol]").forEach((button) => {
     button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
   });
-  const frames = portfolio.timeframes || [];
-  if (!state.timeframe && frames.length) state.timeframe = frames[0];
+  const frames = state.chartTimeframes.length ? state.chartTimeframes : (portfolio.timeframes || []);
+  if (!state.timeframe || frames.indexOf(state.timeframe) < 0) {
+    state.timeframe = frames.indexOf("1m") >= 0 ? "1m" : (frames[0] || null);
+  }
   document.getElementById("timeframes").innerHTML = frames.map((frame) =>
     `<button class="tf-btn ${frame === state.timeframe ? "active" : ""}" type="button" data-tf="${frame}">${frame}</button>`
   ).join("");
@@ -661,19 +711,28 @@ function renderPortfolio(portfolio) {
     <div class="muted">Hard stop auto-exit: ${portfolio.hard_stop ? "on" : "off"}</div>
     ${halt}`;
   const positions = portfolio.positions || [];
-  document.getElementById("positions").innerHTML = positions.length ? positions.map((position) => `
+  document.getElementById("positions").innerHTML = positions.length ? positions.map((position) => {
+    const kind = position.side === "SHORT" ? "SHORT" : "LONG";
+    const button = kind === "SHORT"
+      ? `<button class="buy" type="button" data-cover="${position.symbol}">Buy to cover</button>`
+      : `<button class="sell" type="button" data-sell="${position.symbol}">Sell</button>`;
+    return `
     <div class="card">
-      <strong>${position.symbol}</strong>
+      <strong>${position.symbol} ${kind}</strong>
       <div>Qty ${position.quantity} · avg ${money(position.average_price)} · last ${money(position.last_price)}</div>
       <div class="muted">Stop ${money(position.stop_loss)} · target ${money(position.profit_target)}</div>
-      <button class="sell" type="button" data-sell="${position.symbol}">Sell</button>
-    </div>`).join("") : `<p class="muted">No open paper positions.</p>`;
+      ${button}
+    </div>`;
+  }).join("") : `<p class="muted">No open paper positions.</p>`;
   document.querySelectorAll("[data-sell]").forEach((button) => {
     button.onclick = () => askSell(button.dataset.sell);
   });
+  document.querySelectorAll("[data-cover]").forEach((button) => {
+    button.onclick = () => askBuy(button.dataset.cover);
+  });
   const fills = portfolio.recent_fills || [];
   document.getElementById("fills").innerHTML = fills.length
-    ? `<table><tbody>${fills.map((fill) => `<tr><td>${fill.timestamp}</td><td>${fill.symbol}</td><td>${fill.side}</td><td>${fill.quantity}</td><td>${money(fill.price)}</td></tr>`).join("")}</tbody></table>`
+    ? `<table><tbody>${fills.map((fill) => `<tr><td>${fill.timestamp}</td><td>${fill.symbol}</td><td>${fillLabel(fill)}</td><td>${fill.quantity}</td><td>${money(fill.price)}</td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">No fills in the ledger.</p>`;
 }
 
@@ -951,6 +1010,20 @@ function renderIdeas(explanation) {
   });
 }
 
+function heldSide(symbol) {
+  const position = (state.positions || []).find((item) => item.symbol === symbol && item.quantity > 0);
+  if (!position) return null;
+  return position.side === "SHORT" ? "SHORT" : "LONG";
+}
+function fillLabel(fill) {
+  const effect = {
+    OPEN_LONG: "open long",
+    CLOSE_LONG: "close long",
+    OPEN_SHORT: "open short",
+    CLOSE_SHORT: "cover short",
+  }[fill.effect];
+  return effect ? `${fill.side} ${effect}` : text(fill.side);
+}
 function renderActions() {
   const host = document.getElementById("trade-actions");
   const scan = selectedScan();
@@ -959,21 +1032,28 @@ function renderActions() {
     return;
   }
   const copy = scan.copy || {};
-  const open = (state.positions || []).some((position) => position.symbol === scan.symbol && position.quantity > 0);
-  const buyNote = copy.buy_note || copy.why || "Buy is not available.";
-  const sellNote = open ? "Sell is available for the open paper position. You still have to confirm." : "No open paper position.";
+  const held = heldSide(scan.symbol);
+  const buyOn = held === "SHORT" || (held !== "SHORT" && !!scan.buyable);
+  const sellOn = held === "LONG" || (held === null && !!scan.shortable);
+  const buyNote = held === "SHORT"
+    ? "Buy covers the open paper short. It does not open a long. You still have to confirm."
+    : (copy.buy_note || copy.why || "Buy is not available.");
+  let sellNote = "No open paper position. Sell stays off unless a real sell has a risk size above zero.";
+  if (held === "LONG") sellNote = "Sell closes the open paper long. It does not open a short. You still have to confirm.";
+  else if (held === "SHORT") sellNote = "Sell stays off. This symbol is already a paper short. Buy covers it.";
+  else if (scan.shortable) sellNote = "Sell opens a paper short at the risk size. You still have to confirm. A wait is not a short.";
   host.innerHTML = `
     <div class="label ${decisionClass(scan.decision)}">NEXT STEP · ${scan.symbol}</div>
     <div class="row">
-      <button class="buy" type="button" id="action-buy" ${scan.buyable ? "" : "disabled"}>Buy</button>
-      <button class="sell" type="button" id="action-sell" ${open ? "" : "disabled"}>Sell</button>
+      <button class="buy" type="button" id="action-buy" ${buyOn ? "" : "disabled"}>Buy</button>
+      <button class="sell" type="button" id="action-sell" ${sellOn ? "" : "disabled"}>Sell</button>
     </div>
-    <p class="muted">${scan.buyable ? buyNote : buyNote}</p>
+    <p class="muted">${buyNote}</p>
     <p class="muted">${sellNote}</p>`;
   const buy = document.getElementById("action-buy");
   const sell = document.getElementById("action-sell");
-  if (scan.buyable) buy.onclick = () => askBuy(scan.symbol);
-  if (open) sell.onclick = () => askSell(scan.symbol);
+  if (buyOn) buy.onclick = () => askBuy(scan.symbol);
+  if (sellOn) sell.onclick = () => askSell(scan.symbol);
 }
 
 function renderReview(review) {
@@ -1024,7 +1104,7 @@ function renderAlerts(alerts) {
         <strong class="${decisionClass((state.scans.find((scan) => scan.symbol === alert.symbol) || {}).decision)}">Sell recommended · ${alert.symbol}</strong>
         <div>${text(alert.reason)} · ${text(alert.message)}</div>
         <div class="muted">Observed ${money(alert.price)} · stop ${money(alert.stop_loss)} · target ${money(alert.profit_target)}</div>
-        <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">OK sell</button>
+        <button class="sell" type="button" data-alert="${alert.id}" data-symbol="${alert.symbol}">${alert.action === "cover" ? "OK cover" : "OK sell"}</button>
       </div>`).join("");
   host.innerHTML = `<h2>SELL RECOMMENDED</h2>${body}`;
   host.querySelectorAll("[data-alert]").forEach((button) => {
@@ -1033,13 +1113,25 @@ function renderAlerts(alerts) {
 }
 
 async function askBuy(symbol) {
-  const ok = await confirmTrade("CONFIRM PAPER BUY", `Submit a paper buy for ${symbol}? The server re-checks the signal, risk limits, and the daily-loss halt. Live trading stays off.`);
+  const covering = heldSide(symbol) === "SHORT";
+  const ok = await confirmTrade(
+    covering ? "CONFIRM PAPER COVER" : "CONFIRM PAPER BUY",
+    covering
+      ? `Submit a paper buy to cover the open ${symbol} short at the latest fresh price? This does not open a new long. Live trading stays off.`
+      : `Submit a paper buy for ${symbol}? The server re-checks the signal, risk limits, and the daily-loss halt. Live trading stays off.`
+  );
   if (!ok) return;
   try { await post("/api/buy", { symbol }); await refresh(); }
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
 async function askSell(symbol) {
-  const ok = await confirmTrade("CONFIRM PAPER SELL", `Submit a paper sell for the open ${symbol} position at the latest fresh price? Live trading stays off.`);
+  const closing = heldSide(symbol) === "LONG";
+  const ok = await confirmTrade(
+    closing ? "CONFIRM PAPER SELL" : "CONFIRM PAPER SHORT",
+    closing
+      ? `Submit a paper sell to close the open ${symbol} long? This does not open a short. Live trading stays off.`
+      : `Submit a paper short for ${symbol}? The server re-checks that the scan is a real sell and that the risk size is above zero. A wait is not a short. Live trading stays off.`
+  );
   if (!ok) return;
   try { await post("/api/sell", { symbol }); await refresh(); }
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
@@ -1062,6 +1154,7 @@ async function refresh(forceScan) {
   state.positions = (payload.portfolio && payload.portfolio.positions) || [];
   state.clock = payload.clock || null;
   state.clockFetchedAt = Date.now();
+  state.chartTimeframes = payload.chart_timeframes || [];
   renderSwitchers(payload.portfolio);
   renderPortfolio(payload.portfolio);
   renderRisk(payload.portfolio);
@@ -1268,6 +1361,7 @@ if (window.ResizeObserver) {
 }
 
 chart.addEventListener("mousemove", (event) => {
+  state.pointer = event;
   const layout = state.chart;
   if (!layout || !layout.candles.length || !layout.slot) return;
   const rect = chart.getBoundingClientRect();
@@ -1281,6 +1375,7 @@ chart.addEventListener("mousemove", (event) => {
   showTooltip(bar, event);
 });
 chart.addEventListener("mouseleave", () => {
+  state.pointer = null;
   state.hoverIndex = null;
   if (state.chart) drawCandles(state.chart.candles);
   renderHover(null);
@@ -1291,6 +1386,10 @@ document.getElementById("refresh-now").onclick = () => {
 };
 refresh(false).catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 setInterval(() => { refresh(false).catch(() => {}); }, 20000);
+setInterval(() => {
+  if (!sessionStillOpen()) return;
+  loadCandles({ live: true }).catch(() => {});
+}, CHART_REFRESH_MS);
 setInterval(renderClock, 1000);
 </script>
 </body>
