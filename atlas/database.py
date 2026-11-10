@@ -80,6 +80,13 @@ class AtlasDatabase:
                     quantity INTEGER NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS symbol_scans (
+                    symbol TEXT PRIMARY KEY,
+                    scanned_at TEXT NOT NULL,
+                    decision TEXT,
+                    buyable INTEGER NOT NULL,
+                    card_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS scan_observations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     recorded_at TEXT NOT NULL,
@@ -767,6 +774,41 @@ class AtlasDatabase:
             ).rowcount
             if updated != 1:
                 raise ValueError("Approval execution state does not match the order.")
+
+    def upsert_symbol_scan(self, symbol, card):
+        symbol = str(symbol).strip().upper()
+        scanned_at = str(card.get("scanned_at") or datetime.now(timezone.utc).isoformat())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO symbol_scans(symbol, scanned_at, decision, buyable, card_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    scanned_at = excluded.scanned_at,
+                    decision = excluded.decision,
+                    buyable = excluded.buyable,
+                    card_json = excluded.card_json
+                """,
+                (
+                    symbol,
+                    scanned_at,
+                    card.get("decision"),
+                    1 if card.get("buyable") else 0,
+                    json.dumps(card, sort_keys=True, default=str),
+                ),
+            )
+
+    def list_symbol_scans(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT symbol, card_json FROM symbol_scans ORDER BY symbol"
+            ).fetchall()
+        cards = []
+        for row in rows:
+            card = json.loads(row["card_json"])
+            card["symbol"] = row["symbol"]
+            cards.append(card)
+        return cards
 
     def record_scan_observation(
         self,

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="18">
+<meta name="atlas-dashboard-version" content="19">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -244,7 +244,7 @@
   </section>
   <div class="splitter" data-split="right" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize the trade list. Double-click to reset widths."></div>
   <section class="panel" id="pane-right">
-    <h2>TOP 3 BUY CANDIDATES</h2>
+    <h2>TOP 3 SCAN CANDIDATES</h2>
     <p id="candidate-note" class="muted"></p>
     <div id="candidates"></div>
     <div class="actions" id="trade-actions">
@@ -600,7 +600,15 @@ function paintReaderTitle() {
 }
 
 function renderSwitchers(portfolio) {
-  const symbols = portfolio.instruments || [];
+  const rankedSymbols = (state.top && state.top.length ? state.top : state.scans).map((scan) => scan.symbol);
+  const heldSymbols = (portfolio.positions || []).map((position) => position.symbol);
+  const symbols = [];
+  rankedSymbols.concat(heldSymbols).forEach((symbol) => {
+    if (symbol && symbols.indexOf(symbol) < 0) symbols.push(symbol);
+  });
+  if (!symbols.length && (portfolio.instruments || []).length <= 12) {
+    (portfolio.instruments || []).forEach((symbol) => symbols.push(symbol));
+  }
   if (!state.symbol && symbols.length) state.symbol = symbols[0];
   document.getElementById("symbols").innerHTML = symbols.map((symbol) => {
     const scan = state.scans.find((item) => item.symbol === symbol);
@@ -873,7 +881,7 @@ function renderIdeas(explanation) {
   state.explanation = explanation || "";
   document.getElementById("candidate-note").textContent = state.explanation;
   const ranked = state.scans.slice().sort((a, b) => Number(b.buyable) - Number(a.buyable) || a.symbol.localeCompare(b.symbol));
-  const shown = ranked.slice(0, 3);
+  const shown = (state.top && state.top.length) ? state.top : ranked.slice(0, 3);
   const host = document.getElementById("candidates");
   const extra = state.scans.length > 3 ? `<p class="muted">Showing 3 of ${state.scans.length} symbols you configured.</p>` : "";
   host.innerHTML = extra + shown.map((scan) => {
@@ -996,11 +1004,12 @@ async function askAlert(alertId, symbol) {
 
 function refreshDetail() { renderDetail(); renderWatchlist(); renderActions(); }
 
-async function refresh() {
-  const response = await fetch("/api/state");
+async function refresh(forceScan) {
+  const response = await fetch(forceScan ? "/api/state?scan=1" : "/api/state");
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "State request failed");
   state.scans = payload.scans || [];
+  state.top = payload.top || null;
   state.positions = (payload.portfolio && payload.portfolio.positions) || [];
   state.clock = payload.clock || null;
   state.clockFetchedAt = Date.now();
@@ -1228,10 +1237,10 @@ chart.addEventListener("mouseleave", () => {
   hideTooltip();
 });
 document.getElementById("refresh-now").onclick = () => {
-  refresh().catch((error) => { document.getElementById("watchlist").textContent = error.message; });
+  refresh(true).catch((error) => { document.getElementById("watchlist").textContent = error.message; });
 };
-refresh().catch((error) => { document.getElementById("watchlist").textContent = error.message; });
-setInterval(() => { refresh().catch(() => {}); }, 20000);
+refresh(false).catch((error) => { document.getElementById("watchlist").textContent = error.message; });
+setInterval(() => { refresh(false).catch(() => {}); }, 20000);
 setInterval(renderClock, 1000);
 </script>
 </body>
