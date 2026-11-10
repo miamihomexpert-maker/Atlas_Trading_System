@@ -18,6 +18,13 @@ from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
 from atlas.technical import calculate_ema, calculate_rsi, calculate_sma
 from atlas.baseline import auto_train_enabled, ensure_baseline_model
 from atlas.company import describe_company, profile_for_symbol, resolve_company_loader
+from atlas.learning import (
+    describe_behavior,
+    remember_outcomes,
+    remember_public,
+    resolve_behavior_loader,
+    stamp_learning_bias,
+)
 from atlas.news import http_url, yahoo_profile_url, yahoo_quote_url
 from atlas.news_feed import resolve_news
 from atlas.session import (
@@ -53,6 +60,7 @@ class PaperDashboard:
         hard_stop=None,
         name_loader=None,
         company_loader=None,
+        behavior_loader=None,
     ):
         if not token or not str(token).strip():
             raise ValueError("Dashboard token is required.")
@@ -80,6 +88,8 @@ class PaperDashboard:
         self._names = {}
         self.company_loader = resolve_company_loader(company_loader)
         self._companies = {}
+        self.behavior_loader = resolve_behavior_loader(behavior_loader)
+        self._behavior = {}
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
 
@@ -135,7 +145,62 @@ class PaperDashboard:
         card["technical_copy"] = describe_technicals(card)
         card["links"] = _outbound_links(card)
         card["copy"] = describe_scan(card)
+        card["behavior"] = self._behavior_for(card["symbol"])
         return card
+
+    def _learn(self, symbol, histories):
+        try:
+            remember_outcomes(self.database, symbol, histories)
+        except Exception as error:
+            logger.info("%s learning skipped: %s", symbol, error)
+
+    def _behavior_for(self, symbol):
+        symbol = str(symbol).strip().upper()
+        if symbol in self._behavior:
+            return self._behavior[symbol]
+        status = "NOT_LOADED"
+        error = None
+        fetched_at = None
+        if self.behavior_loader is not None:
+            try:
+                fetched = self.behavior_loader(symbol)
+            except Exception as error_value:
+                fetched = None
+                status = "FETCH_FAILED"
+                error = str(error_value)
+            else:
+                if not isinstance(fetched, dict):
+                    status = "FETCH_FAILED"
+                    error = "Behavior loader did not return a record."
+                else:
+                    status = fetched.get("status") or "FETCHED"
+                    error = fetched.get("error")
+                    fetched_at = fetched.get("fetched_at")
+                    try:
+                        remember_public(self.database, symbol, fetched)
+                    except Exception as error_value:
+                        logger.info("%s public behavior was not stored: %s", symbol, error_value)
+        try:
+            events = self.database.list_learning_events(symbol)
+        except Exception as error_value:
+            logger.info("%s learning read failed: %s", symbol, error_value)
+            events = []
+        payload = describe_behavior(symbol, events, status, error, fetched_at)
+        self._behavior[symbol] = payload
+        return payload
+
+    def _with_learning_bias(self, cards):
+        events = {}
+        for card in cards:
+            symbol = card.get("symbol")
+            if symbol in events:
+                continue
+            try:
+                events[symbol] = self.database.list_learning_events(symbol)
+            except Exception as error:
+                logger.info("%s learning bias skipped: %s", symbol, error)
+                events[symbol] = []
+        return stamp_learning_bias(cards, events)
 
     def _prepare(self):
         if not self._news_explicit:
@@ -305,8 +370,10 @@ class PaperDashboard:
                 scans.append(self._described(_empty_scan(symbol, str(error))))
                 skipped.append(f"{symbol} could not be scored: {error}")
                 continue
-            card = self._described(_scan_card(symbol, preview, broker))
+            card = _scan_card(symbol, preview, broker)
             self._record_observation(card, histories)
+            self._learn(symbol, histories)
+            card = self._described(card)
             scans.append(card)
             recommendation = preview.get("recommendation")
             if preview.get("decision") != "BUY" or not recommendation:
@@ -321,7 +388,9 @@ class PaperDashboard:
                 skipped.append(
                     f"{card['symbol']} is BUY but risk limits permit no shares."
                 )
-        qualified.sort(key=lambda item: (-(item["confidence"] or -1), item["symbol"]))
+        scans = self._with_learning_bias(scans)
+        qualified = [card for card in scans if card.get("buyable")]
+        qualified.sort(key=lambda item: (-(item["confidence"] or -1), -(item.get("learning_bias") or 0), item["symbol"]))
         top = qualified[:3]
         if len(qualified) >= 3:
             explanation = None
@@ -385,8 +454,10 @@ class PaperDashboard:
             except Exception as error:
                 self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
                 continue
-            card = self._described(_scan_card(symbol, preview, broker))
+            card = _scan_card(symbol, preview, broker)
             self._record_observation(card, histories)
+            self._learn(symbol, histories)
+            card = self._described(card)
             self.database.upsert_symbol_scan(symbol, card)
         stored = {card["symbol"] for card in self.database.list_symbol_scans()}
         self.database.set_metadata(
@@ -423,6 +494,7 @@ class PaperDashboard:
                 )
                 card["buyable"] = isinstance(card["quantity"], int) and card["quantity"] > 0
             sized.append(card)
+        sized = self._with_learning_bias(sized)
         ranked = rank_scans(sized)
         top = [self._described(dict(card)) for card in ranked[:3]]
         shown = list(top)

@@ -99,6 +99,17 @@ class AtlasDatabase:
                     model_signal TEXT,
                     model_version TEXT
                 );
+                CREATE TABLE IF NOT EXISTS learning_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    learned_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_key TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    detail_json TEXT NOT NULL,
+                    effect TEXT NOT NULL,
+                    UNIQUE(symbol, source, source_key)
+                );
                 CREATE TABLE IF NOT EXISTS trade_approvals (
                     token TEXT PRIMARY KEY,
                     chat_id TEXT NOT NULL,
@@ -875,6 +886,73 @@ class AtlasDatabase:
                 "SELECT * FROM scan_observations ORDER BY id"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_learning_event(
+        self,
+        symbol,
+        source,
+        source_key,
+        summary,
+        detail,
+        effect,
+        learned_at=None,
+    ):
+        """Store one auditable learning row. A repeat of the same source key is ignored."""
+        symbol = str(symbol).strip().upper()
+        source = str(source).strip()
+        source_key = str(source_key).strip()
+        effect = str(effect).strip()
+        if effect not in {"none", "context_only", "ranking_tie_break"}:
+            raise ValueError("Learning effect is not recognized.")
+        if not symbol or not source or not source_key:
+            raise ValueError("A learning event needs a symbol, source, and source key.")
+        stamp = learned_at or datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(detail or {}, sort_keys=True, default=str)
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO learning_events(
+                    learned_at, symbol, source, source_key, summary, detail_json, effect
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (stamp, symbol, source, source_key, str(summary), payload, effect),
+            )
+            inserted = cursor.rowcount == 1
+        if inserted:
+            self.record_audit_event(
+                "LEARNING_RECORDED",
+                symbol,
+                {
+                    "source": source,
+                    "source_key": source_key,
+                    "effect": effect,
+                    "summary": str(summary),
+                    "learned_at": stamp,
+                },
+            )
+        return inserted
+
+    def list_learning_events(self, symbol=None):
+        with self._lock:
+            if symbol is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM learning_events ORDER BY id"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM learning_events
+                    WHERE symbol = ?
+                    ORDER BY id
+                    """,
+                    (str(symbol).strip().upper(),),
+                ).fetchall()
+        events = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item.pop("detail_json"))
+            events.append(item)
+        return events
 
     def get_metadata(self, key, default=None):
         with self._lock:
