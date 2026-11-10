@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="22">
+<meta name="atlas-dashboard-version" content="23">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -130,6 +130,29 @@
   #behavior p, #behavior li, #behavior .clip { color: #f7fbff; }
   #behavior a { color: #ffd56a; text-decoration: underline; }
   #behavior .muted { color: #d7e4ef; }
+  #predictions {
+    color: #f7fbff;
+    background: rgba(4, 10, 18, 0.72);
+    padding: 8px 10px;
+  }
+  #predictions h2, #predictions h3 { color: #ffffff; }
+  #predictions h2.decision.BUY { color: var(--up); }
+  #predictions h2.decision.SELL { color: var(--down); }
+  #predictions h2.decision.WAIT, #predictions h2.decision.NO_DATA { color: var(--amber); }
+  #predictions p, #predictions li, #predictions .clip { color: #f7fbff; }
+  #predictions a { color: #ffd56a; text-decoration: underline; }
+  #predictions .muted { color: #d7e4ef; }
+  #predictions .lead { font-size: 18px; font-weight: 700; color: #ffffff; }
+  #investors {
+    color: #f7fbff;
+    background: rgba(4, 10, 18, 0.72);
+    padding: 8px 10px;
+  }
+  #investors h2, #investors h3 { color: #ffffff; }
+  #investors p, #investors .clip { color: #f7fbff; }
+  #investors a { color: #ffd56a; text-decoration: underline; }
+  #investors .muted { color: #d7e4ef; }
+  .tab-rail button[data-tab="predictions"] { font-weight: 700; }
   .splitter[hidden] { display: none; }
   .splitter {
     flex: 0 0 10px;
@@ -240,6 +263,8 @@
     </div>
   </section>
   <nav class="tab-rail" aria-label="More about the selected symbol">
+    <button type="button" data-tab="predictions">Predictions</button>
+    <button type="button" data-tab="investors">Investors</button>
     <button type="button" data-tab="signals">Signals</button>
     <button type="button" data-tab="technicals">Technicals</button>
     <button type="button" data-tab="news">Relevant News</button>
@@ -257,6 +282,8 @@
       <button id="reader-close" type="button">Close</button>
     </div>
     <div class="reader-body">
+      <div class="reader-panel" id="predictions" data-panel="predictions"><h2>PREDICTIONS</h2><p class="muted">Select a symbol. This is the main read of public stockholder behavior. It is not a forecast of profit.</p></div>
+      <div class="reader-panel" id="investors" data-panel="investors"><h2>INVESTORS</h2><p class="muted">Select a symbol. Only investors the public feed returned are listed. None is filled in.</p></div>
       <div class="reader-panel subpanel" id="signals" data-panel="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
       <div class="reader-panel subpanel" id="technicals" data-panel="technicals"><h2>TECHNICALS</h2><p class="muted">Waiting for the scan.</p></div>
       <div class="reader-panel subpanel" id="news" data-panel="news"><h2>NEWS</h2><p class="muted">Waiting for the news feed.</p></div>
@@ -772,6 +799,8 @@ function renderDetail() {
     renderTechnicals(null);
     renderCompany(null);
     renderBehavior(null);
+    renderPredictions(null);
+    renderInvestors(null);
     paintReaderTitle();
     return;
   }
@@ -785,6 +814,8 @@ function renderDetail() {
   renderTechnicals(scan);
   renderCompany(scan);
   renderBehavior(scan);
+  renderPredictions(scan);
+  renderInvestors(scan);
   paintReaderTitle();
 }
 
@@ -800,6 +831,114 @@ function renderTechnicals(scan) {
     : `<p class="muted">The scan did not return technical observations.</p>`);
 }
 
+function renderPredictions(scan) {
+  const host = document.getElementById("predictions");
+  if (!scan) {
+    host.innerHTML = `<h2>PREDICTIONS</h2><p class="muted">Select a symbol. This is the main read of public stockholder behavior. It is not a forecast of profit.</p>`;
+    return;
+  }
+  const prediction = scan.prediction || {};
+  const past = prediction.past || {};
+  const present = prediction.present || {};
+  const record = prediction.track_record || {};
+  const overall = prediction.overall_track_record || {};
+  const gate = prediction.gate || {};
+  const parts = [`<h2 class="${decisionClass(scan.decision)}">PREDICTIONS · ${scan.symbol}</h2>`];
+  parts.push(`<p>${escapeHtml(prediction.disclaimer || "This is not a forecast of profit.")}</p>`);
+  parts.push(`<p class="lead">${escapeHtml(prediction.lead || "There is not enough public data to state a likelihood.")}</p>`);
+  const flow = prediction.flow || {};
+  const activity = flow.activity || {};
+  const volume = flow.volume || {};
+  parts.push(`<h3>Why shares are being bought or sold</h3>`);
+  parts.push(`<p class="lead">${escapeHtml(flow.why || "No public reason was returned.")}</p>`);
+  if (activity.note) parts.push(`<p>${escapeHtml(activity.note)}</p>`);
+  if (volume.note) parts.push(`<p>${escapeHtml(volume.note)}</p>`);
+  (flow.findings || []).forEach((item) => {
+    const link = item.url && safeUrl(item.url)
+      ? `<a href="${escapeHtml(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">Source link</a>`
+      : `<span class="muted">The feed did not include a filing link.</span>`;
+    parts.push(`<article class="clip">${escapeHtml(item.summary)}<br>${link}<br><span class="muted">${escapeHtml(item.source)} · ${escapeHtml(item.date)}</span></article>`);
+  });
+  parts.push(`<h3>Major players</h3>`);
+  const players = flow.players || [];
+  if (!players.length) parts.push(`<p class="muted">No insider or holder was returned.</p>`);
+  players.forEach((player) => {
+    const shares = player.shares === null || player.shares === undefined ? "share count not returned" : `${player.shares} shares`;
+    const link = player.url && safeUrl(player.url)
+      ? `<a href="${escapeHtml(safeUrl(player.url))}" target="_blank" rel="noopener noreferrer">Source link</a>`
+      : `<span class="muted">The feed did not include a filing link.</span>`;
+    parts.push(`<article class="clip"><strong>${escapeHtml(player.name)}</strong> · ${escapeHtml(player.action_label)} · ${escapeHtml(shares)}<br>${escapeHtml(player.motive_note)}<br>${link}<br><span class="muted">${escapeHtml(player.date)} · ${escapeHtml(player.source)}</span></article>`);
+  });
+  parts.push(`<h3>Past later bars</h3><p>${escapeHtml(past.note || "No later-bar count was returned.")}</p>`);
+  parts.push(`<h3>Present disclosed decisions</h3><p>${escapeHtml(present.note || "No disclosed decision was returned.")}</p>`);
+  parts.push(`<p>${escapeHtml(present.holder_note || "")}</p>`);
+  parts.push(`<h3>Behavioral tendencies</h3>`);
+  const tendencies = prediction.tendencies || [];
+  if (!tendencies.length) {
+    parts.push(`<p class="muted">No tendency is supported by the public rows.</p>`);
+  }
+  tendencies.forEach((item) => parts.push(`<article class="clip"><strong>${escapeHtml(item.summary)}</strong><div class="muted">${escapeHtml(item.cases)} comparable cases. Effect context only.</div></article>`));
+  (prediction.not_supported || []).forEach((line) => parts.push(`<p class="muted">${escapeHtml(line)}</p>`));
+  parts.push(`<h3>Track record</h3><p>${escapeHtml(record.reason || "No graded prediction is stored yet.")}</p>`);
+  parts.push(`<p class="muted">This symbol: ${escapeHtml(record.graded)} graded, ${escapeHtml(record.correct)} matched, ${escapeHtml(record.incorrect)} did not. Overall: ${escapeHtml(overall.graded)} graded, ${escapeHtml(overall.correct)} matched.</p>`);
+  parts.push(`<h3>Paper order gate</h3><p>${escapeHtml(gate.reason || "The prediction gate has not been evaluated.")}</p>`);
+  parts.push(`<p class="muted">The scan decision stays ${escapeHtml(scan.decision)}. This tab does not rewrite it.</p>`);
+  const form4 = safeUrl(prediction.sec_form4_search);
+  const form13 = safeUrl(prediction.sec_13f_search);
+  const links = [];
+  if (form4) links.push(`<a href="${escapeHtml(form4)}" target="_blank" rel="noopener noreferrer">SEC Form 4 search</a>`);
+  if (form13) links.push(`<a href="${escapeHtml(form13)}" target="_blank" rel="noopener noreferrer">SEC 13F search</a>`);
+  if (links.length) parts.push(`<p>${links.join(" · ")}</p>`);
+  parts.push(`<h3>Sources</h3>`);
+  const sources = prediction.sources || [];
+  if (!sources.length) parts.push(`<p class="muted">No source row is stored yet.</p>`);
+  sources.forEach((item) => {
+    const link = item.url && safeUrl(item.url)
+      ? `<a href="${escapeHtml(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">Source link</a>`
+      : `<span class="muted">The feed did not include a filing link.</span>`;
+    parts.push(`<article class="clip">${escapeHtml(item.summary)}<br>${link}<br><span class="muted">${escapeHtml(item.source)} · ${escapeHtml(item.learned_at)} · effect ${escapeHtml(item.effect)}</span></article>`);
+  });
+  host.innerHTML = parts.join("");
+}
+function renderInvestors(scan) {
+  const host = document.getElementById("investors");
+  if (!scan) {
+    host.innerHTML = `<h2>INVESTORS</h2><p class="muted">Select a symbol. Only investors the public feed returned are listed. None is filled in.</p>`;
+    return;
+  }
+  const board = (scan.prediction && scan.prediction.investors) || {};
+  const people = board.investors || [];
+  const parts = [`<h2 class="${decisionClass(scan.decision)}">INVESTORS · ${scan.symbol}</h2>`];
+  parts.push(`<p>${escapeHtml(board.filings_note || "Filings can be delayed or incomplete.")}</p>`);
+  parts.push(`<p>${escapeHtml(board.note || "No major investor with a name and a date was returned. None is filled in.")}</p>`);
+  if (!people.length) {
+    parts.push(`<p class="muted">No major investor was returned. None is filled in.</p>`);
+  }
+  people.forEach((investor) => {
+    parts.push(`<h3>${escapeHtml(investor.name)}</h3>`);
+    parts.push(`<p>${escapeHtml(investor.learned)}</p>`);
+    (investor.movements || []).forEach((movement) => {
+      const shares = movement.shares === null || movement.shares === undefined
+        ? "share count not returned"
+        : `${movement.shares} shares`;
+      const link = movement.url && safeUrl(movement.url)
+        ? `<a href="${escapeHtml(safeUrl(movement.url))}" target="_blank" rel="noopener noreferrer">Source link</a>`
+        : `<span class="muted">The feed did not include a filing link.</span>`;
+      const outcome = movement.outcome
+        ? escapeHtml(movement.outcome.note)
+        : "No later bar is stored after this movement yet.";
+      parts.push(
+        `<article class="clip"><strong>${escapeHtml(movement.action_label)}</strong> · ${escapeHtml(movement.date)} · ${escapeHtml(shares)}`
+        + `<br>${escapeHtml(movement.comparison_note)}`
+        + `<br>${outcome}`
+        + `<br>${escapeHtml(movement.motive_note)}`
+        + `<br>${link}`
+        + `<br><span class="muted">${escapeHtml(movement.source)} · comparison ${escapeHtml(movement.comparison)} · ${escapeHtml(movement.filings_note)}</span></article>`
+      );
+    });
+  });
+  host.innerHTML = parts.join("");
+}
 function renderBehavior(scan) {
   const host = document.getElementById("behavior");
   if (!scan) {
@@ -816,6 +955,9 @@ function renderBehavior(scan) {
   if (form13) links.push(`<a href="${escapeHtml(form13)}" target="_blank" rel="noopener noreferrer">SEC 13F search</a>`);
   if (links.length) parts.push(`<p>${links.join(" · ")}</p>`);
   parts.push(`<p class="muted">Those are search pages, not a claim that a filing was returned.</p>`);
+  if (scan.prediction && scan.prediction.flow && scan.prediction.flow.why) {
+    parts.push(`<h3>Why the public rows show buying or selling</h3><p>${escapeHtml(scan.prediction.flow.why)}</p>`);
+  }
   (behavior.insiders || []).forEach((row) => parts.push(behaviorRow(row)));
   (behavior.holders || []).forEach((row) => parts.push(behaviorRow(row)));
   if (!(behavior.insiders || []).length && !(behavior.holders || []).length) {
@@ -1033,15 +1175,21 @@ function renderActions() {
   }
   const copy = scan.copy || {};
   const held = heldSide(scan.symbol);
-  const buyOn = held === "SHORT" || (held !== "SHORT" && !!scan.buyable);
-  const sellOn = held === "LONG" || (held === null && !!scan.shortable);
+  const gate = (scan.prediction && scan.prediction.gate) || {};
+  const buyOn = held === "SHORT" || !!scan.buyable || !!gate.allow_buy;
+  const sellOn = held === "LONG" || (held === null && !!scan.shortable) || !!gate.allow_sell;
   const buyNote = held === "SHORT"
     ? "Buy covers the open paper short. It does not open a long. You still have to confirm."
-    : (copy.buy_note || copy.why || "Buy is not available.");
+    : (scan.buyable
+      ? (copy.buy_note || copy.why || "Buy is not available.")
+      : (gate.buy_note || copy.why || "Buy is not available."));
   let sellNote = "No open paper position. Sell stays off unless a real sell has a risk size above zero.";
-  if (held === "LONG") sellNote = "Sell closes the open paper long. It does not open a short. You still have to confirm.";
+  if (held === "LONG") sellNote = gate.allow_sell
+    ? (gate.sell_note || "Sell closes the open paper long. It does not open a short.")
+    : "Sell closes the open paper long. It does not open a short. You still have to confirm.";
   else if (held === "SHORT") sellNote = "Sell stays off. This symbol is already a paper short. Buy covers it.";
   else if (scan.shortable) sellNote = "Sell opens a paper short at the risk size. You still have to confirm. A wait is not a short.";
+  else if (gate.sell_note) sellNote = gate.sell_note;
   host.innerHTML = `
     <div class="label ${decisionClass(scan.decision)}">NEXT STEP · ${scan.symbol}</div>
     <div class="row">
@@ -1172,8 +1320,10 @@ const LAYOUT_KEY = "atlas-paper-layout";
 const TAB_KEY = "atlas-paper-tab";
 const LAYOUT_DEFAULTS = { left: 260, right: 320, reader: 380 };
 const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], reader: [280, 640] };
-const TAB_IDS = ["signals", "technicals", "news", "model", "company", "behavior", "risk", "sells", "review"];
+const TAB_IDS = ["predictions", "investors", "signals", "technicals", "news", "model", "company", "behavior", "risk", "sells", "review"];
 const TAB_LABELS = {
+  predictions: "Predictions",
+  investors: "Investors",
   signals: "Signals",
   technicals: "Technicals",
   news: "Relevant News",
