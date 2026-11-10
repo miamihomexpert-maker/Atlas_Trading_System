@@ -92,12 +92,29 @@ def _review_fill(order, orders, bars_by_symbol):
         "counts": False,
         "note": "Not enough later bars yet.",
     }
-    if side == "SELL":
+    effect = str(order.get("effect") or "").upper()
+    row["effect"] = effect or None
+    if effect == "OPEN_SHORT":
+        if later is None or price is None or not isinstance(quantity, int) or isinstance(quantity, bool):
+            row["note"] = "This opened a paper short. Not enough later bars yet."
+            return row
+        row["result"] = (price - later["close"]) * quantity
+        row["result_kind"] = "next_bar"
+        change = _return(price, later["close"])
+        row["next_return"] = None if change is None else -change
+        row["counts"] = True
+        row["note"] = "This opened a paper short. Marked to the next bar. This is not a closed-trade profit."
+        return row
+    if side == "SELL" or effect == "CLOSE_SHORT":
         realized = _number(order.get("realized_pnl"))
         row["result"] = realized
         row["result_kind"] = "realized"
         row["counts"] = realized is not None
-        row["note"] = "Realized P&L from the ledger for this sell."
+        row["note"] = (
+            "Realized P&L from covering this paper short."
+            if effect == "CLOSE_SHORT"
+            else "Realized P&L from the ledger for this sell."
+        )
         if later is None:
             row["note"] += " No bar after this fill is available yet."
         return row

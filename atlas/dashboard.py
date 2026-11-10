@@ -220,6 +220,7 @@ class PaperDashboard:
         for symbol, position in sorted(broker.positions().items()):
             positions.append({
                 "symbol": symbol,
+                "side": position.get("side", "LONG"),
                 "quantity": position["quantity"],
                 "average_price": position["average_price"],
                 "last_price": position["last_price"],
@@ -232,6 +233,7 @@ class PaperDashboard:
                 "timestamp": row["timestamp"],
                 "symbol": row["symbol"],
                 "side": row["side"],
+                "effect": row.get("effect"),
                 "quantity": row["quantity"],
                 "price": row["price"],
             })
@@ -319,6 +321,7 @@ class PaperDashboard:
                 "profit_target": alert["profit_target"],
                 "created_at": alert["created_at"],
                 "message": (alert.get("detail") or {}).get("message"),
+                "action": (alert.get("detail") or {}).get("action") or "sell",
             })
         return rows
 
@@ -449,16 +452,23 @@ class PaperDashboard:
         for card in self.database.list_symbol_scans():
             card = dict(card)
             entry, stop = card.get("entry"), card.get("stop")
+            held = broker.positions().get(card.get("symbol"))
+            held_side = None if held is None else held.get("side", "LONG")
+            sized_quantity = None
             if (
-                card.get("decision") == "BUY"
+                card.get("decision") in {"BUY", "SELL"}
                 and isinstance(entry, (int, float))
                 and isinstance(stop, (int, float))
                 and not isinstance(entry, bool)
+                and not isinstance(stop, bool)
             ):
-                card["quantity"] = calculate_position_size(
+                sized_quantity = calculate_position_size(
                     equity, entry, stop, current_exposure=exposure
                 )
-                card["buyable"] = isinstance(card["quantity"], int) and card["quantity"] > 0
+                card["quantity"] = sized_quantity
+            tradable = isinstance(sized_quantity, int) and sized_quantity > 0
+            card["buyable"] = card.get("decision") == "BUY" and tradable and held_side != "SHORT"
+            card["shortable"] = card.get("decision") == "SELL" and tradable and held_side != "LONG"
             sized.append(card)
         ranked = rank_scans(sized)
         top = [self._described(dict(card)) for card in ranked[:3]]
@@ -536,6 +546,9 @@ class PaperDashboard:
         normalized = str(symbol).strip().upper()
         clicked_at = self._audit("DASHBOARD_BUY_CLICK", normalized, {})
         broker = self._broker()
+        held = broker.positions().get(normalized)
+        if held is not None and held.get("side") == "SHORT":
+            return self._cover_short(normalized, broker, clicked_at)
         histories = self._histories(normalized)
         if not histories:
             self._audit("DASHBOARD_BUY_REJECTED", normalized, {"reason": "no bars"})
@@ -580,40 +593,146 @@ class PaperDashboard:
         )
         return {"ok": True, "order": _public_order(order)}
 
+    def _cover_short(self, symbol, broker, clicked_at, alert_id=None):
+        histories = self._histories(symbol)
+        quote = _latest_quote(histories)
+        if quote is None:
+            self._audit("DASHBOARD_COVER_REJECTED", symbol, {"reason": "no price"})
+            raise ValueError(f"{symbol} has no fresh price.")
+        market_timestamp, price = quote
+        if _quote_is_stale(market_timestamp, self.settings.max_market_data_age_seconds):
+            self._audit("DASHBOARD_COVER_REJECTED", symbol, {"reason": "stale"})
+            raise PermissionError("Signal rejected because source market data is stale.")
+        from atlas.session import _cover_signal
+
+        try:
+            order = execute_paper_signal(
+                _cover_signal(symbol, price, market_timestamp),
+                broker,
+                f"dash-cover-{symbol}-{uuid.uuid4().hex[:12]}",
+                approved=True,
+                max_data_age_seconds=self.settings.max_market_data_age_seconds,
+                approval_database=self.database,
+            )
+        except PermissionError as error:
+            self._audit("DASHBOARD_COVER_REJECTED", symbol, {"reason": str(error)})
+            raise
+        if alert_id is not None:
+            self.database.set_exit_alert_status(alert_id, "ACCEPTED")
+        self._audit(
+            "DASHBOARD_COVER_FILLED",
+            symbol,
+            {
+                "clicked_at": clicked_at,
+                "order_id": order["order_id"],
+                "quantity": order["quantity"],
+                "effect": order.get("effect"),
+                "position": "SHORT",
+            },
+        )
+        return {"ok": True, "order": _public_order(order)}
+
     def sell(self, token, symbol, alert_id=None):
         self._guard(token)
         normalized = str(symbol).strip().upper()
         action = "DASHBOARD_SELL_CLICK" if alert_id is None else "DASHBOARD_EXIT_ACCEPTED"
         clicked_at = self._audit(action, normalized, {"alert_id": alert_id})
         broker = self._broker()
-        if normalized not in broker.positions():
-            raise ValueError(f"{normalized} has no open paper position.")
+        held = broker.positions().get(normalized)
+        held_side = None if held is None else held.get("side", "LONG")
+        if held_side == "SHORT":
+            self._audit("DASHBOARD_SELL_REJECTED", normalized, {"reason": "already short"})
+            raise ValueError(f"{normalized} is already a paper short. Buy covers it.")
+        if held_side == "LONG":
+            return self._close_long(normalized, broker, clicked_at, alert_id)
         histories = self._histories(normalized)
+        if not histories:
+            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": "no bars"})
+            raise ValueError(f"{normalized} has no market bars.")
+        preview = self._preview(normalized, broker, histories)
+        recommendation = preview.get("recommendation")
+        if preview.get("decision") != "SELL" or not recommendation:
+            self._audit(
+                "DASHBOARD_SHORT_REJECTED",
+                normalized,
+                {"reason": preview.get("decision")},
+            )
+            raise ValueError(f"{normalized} is not a current SELL. A wait is not a short.")
+        limits = RiskLimits()
+        sized = calculate_position_size(
+            broker.account_info()["equity"],
+            recommendation["entry_price"],
+            recommendation["stop_loss"],
+            limits,
+            current_exposure=broker.current_exposure(),
+        )
+        if sized <= 0:
+            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": "risk size 0"})
+            raise PermissionError("Risk limits permit no shares.")
+        try:
+            order = execute_paper_signal(
+                recommendation,
+                broker,
+                f"dash-short-{normalized}-{uuid.uuid4().hex[:12]}",
+                approved=True,
+                limits=limits,
+                max_data_age_seconds=self.settings.max_market_data_age_seconds,
+                approval_database=self.database,
+            )
+        except PermissionError as error:
+            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": str(error)})
+            raise
+        if order.get("effect") != "OPEN_SHORT":
+            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": order.get("effect")})
+            raise ValueError(f"{normalized} sell did not open a short.")
+        self._audit(
+            "DASHBOARD_SHORT_FILLED",
+            normalized,
+            {
+                "clicked_at": clicked_at,
+                "order_id": order["order_id"],
+                "quantity": order["quantity"],
+                "effect": order.get("effect"),
+                "position": "SHORT",
+            },
+        )
+        return {"ok": True, "order": _public_order(order)}
+
+    def _close_long(self, symbol, broker, clicked_at, alert_id=None):
+        histories = self._histories(symbol)
         quote = _latest_quote(histories)
         if quote is None:
-            raise ValueError(f"{normalized} has no fresh price.")
+            raise ValueError(f"{symbol} has no fresh price.")
         market_timestamp, price = quote
         if _quote_is_stale(market_timestamp, self.settings.max_market_data_age_seconds):
             raise PermissionError("Signal rejected because source market data is stale.")
-        signal = _exit_signal(normalized, price, market_timestamp)
+        signal = _exit_signal(symbol, price, market_timestamp)
         try:
             order = execute_paper_signal(
                 signal,
                 broker,
-                f"dash-sell-{normalized}-{uuid.uuid4().hex[:12]}",
+                f"dash-sell-{symbol}-{uuid.uuid4().hex[:12]}",
                 approved=True,
                 max_data_age_seconds=self.settings.max_market_data_age_seconds,
                 approval_database=self.database,
             )
         except PermissionError as error:
-            self._audit("DASHBOARD_SELL_REJECTED", normalized, {"reason": str(error)})
+            self._audit("DASHBOARD_SELL_REJECTED", symbol, {"reason": str(error)})
             raise
+        if order.get("effect") != "CLOSE_LONG":
+            raise ValueError(f"{symbol} sell did not close the long.")
         if alert_id is not None:
             self.database.set_exit_alert_status(alert_id, "ACCEPTED")
         self._audit(
             "DASHBOARD_SELL_FILLED",
-            normalized,
-            {"clicked_at": clicked_at, "order_id": order["order_id"], "quantity": order["quantity"]},
+            symbol,
+            {
+                "clicked_at": clicked_at,
+                "order_id": order["order_id"],
+                "quantity": order["quantity"],
+                "effect": order.get("effect"),
+                "position": "LONG",
+            },
         )
         return {"ok": True, "order": _public_order(order)}
 
@@ -621,7 +740,16 @@ class PaperDashboard:
         self._guard(token)
         alert = self.database.get_exit_alert(alert_id)
         if alert is None or alert["status"] != "PENDING":
-            raise ValueError("That sell recommendation is no longer pending.")
+            raise ValueError("That exit recommendation is no longer pending.")
+        symbol = str(alert["symbol"]).strip().upper()
+        held = self._broker().positions().get(symbol)
+        if held is not None and held.get("side") == "SHORT":
+            clicked_at = self._audit(
+                "DASHBOARD_EXIT_ACCEPTED",
+                symbol,
+                {"alert_id": alert["id"], "position": "SHORT"},
+            )
+            return self._cover_short(symbol, self._broker(), clicked_at, alert_id=alert["id"])
         return self.sell(token, alert["symbol"], alert_id=alert["id"])
 
 
@@ -752,7 +880,12 @@ def describe_scan(card):
             if buy_enabled
             else why
         ),
-        "sell_note": "No open paper position.",
+        "sell_note": (
+            "Sell can open a paper short at the risk size. You still have to confirm. "
+            "An open long is closed instead and is not flipped into a short."
+            if card.get("shortable")
+            else "No open paper position. Sell stays off unless a real sell has a risk size above zero."
+        ),
     }
 
 
@@ -824,6 +957,7 @@ def _empty_scan(symbol, reason):
         "confidence": None,
         "reasons": [reason],
         "buyable": False,
+        "shortable": False,
         "agreement": None,
         "scanned_at": None,
         "timeframes": {},
@@ -844,17 +978,25 @@ def _scan_card(symbol, preview, broker):
     decision = preview.get("decision") or analysis.get("status") or "unavailable"
     quantity = None
     entry = stop = target = None
-    if recommendation and decision == "BUY":
+    held = broker.positions().get(str(symbol).strip().upper())
+    held_side = None if held is None else held.get("side", "LONG")
+    if recommendation and decision in {"BUY", "SELL"}:
         entry = recommendation.get("entry_price")
         stop = recommendation.get("stop_loss")
         target = recommendation.get("profit_target")
-        if isinstance(entry, (int, float)) and isinstance(stop, (int, float)):
+        if (
+            isinstance(entry, (int, float))
+            and isinstance(stop, (int, float))
+            and not isinstance(entry, bool)
+            and not isinstance(stop, bool)
+        ):
             quantity = calculate_position_size(
                 broker.account_info()["equity"],
                 entry,
                 stop,
                 current_exposure=broker.current_exposure(),
             )
+    tradable = isinstance(quantity, int) and quantity > 0
     news = preview.get("news") or {}
     adaptive = preview.get("adaptive") or {}
     prediction = adaptive.get("prediction") or {}
@@ -893,7 +1035,8 @@ def _scan_card(symbol, preview, broker):
         "quantity": quantity,
         "confidence": _buy_confidence(preview),
         "reasons": _reasons(preview),
-        "buyable": decision == "BUY" and isinstance(quantity, int) and quantity > 0,
+        "buyable": decision == "BUY" and tradable and held_side != "SHORT",
+        "shortable": decision == "SELL" and tradable and held_side != "LONG",
         "agreement": analysis.get("agreement"),
         "scanned_at": preview.get("scanned_at"),
         "timeframes": timeframes,
@@ -1043,6 +1186,7 @@ def _public_order(order):
         "order_id": order["order_id"],
         "symbol": order["symbol"],
         "side": order["side"],
+        "effect": order.get("effect"),
         "quantity": order["quantity"],
         "price": order["price"],
         "status": order["status"],

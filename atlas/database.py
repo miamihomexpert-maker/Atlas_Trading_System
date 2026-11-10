@@ -7,6 +7,15 @@ import sqlite3
 import threading
 
 
+def _fill_closes(row):
+    effect = str(row.get("effect") or "").upper()
+    if effect in {"CLOSE_LONG", "CLOSE_SHORT"}:
+        return True
+    if effect in {"OPEN_LONG", "OPEN_SHORT"}:
+        return False
+    return row.get("side") == "SELL"
+
+
 class AtlasDatabase:
     """Local SQLite persistence for paper fills, equity, and model versions."""
 
@@ -121,6 +130,20 @@ class AtlasDatabase:
                 self._connection.execute(
                     "ALTER TABLE trade_approvals ADD COLUMN order_id TEXT"
                 )
+            order_columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(paper_orders)").fetchall()
+            }
+            if "effect" not in order_columns:
+                self._connection.execute("ALTER TABLE paper_orders ADD COLUMN effect TEXT")
+            plan_columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(position_plans)").fetchall()
+            }
+            if "side" not in plan_columns:
+                self._connection.execute(
+                    "ALTER TABLE position_plans ADD COLUMN side TEXT NOT NULL DEFAULT 'LONG'"
+                )
 
     def close(self):
         with self._lock:
@@ -173,8 +196,8 @@ class AtlasDatabase:
                 """
                 INSERT INTO paper_orders(
                     order_id, timestamp, symbol, side, quantity, price,
-                    realized_pnl, equity
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    realized_pnl, equity, effect
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order["order_id"],
@@ -185,6 +208,7 @@ class AtlasDatabase:
                     order["price"],
                     float(realized_pnl),
                     float(account["equity"]),
+                    order.get("effect"),
                 ),
             )
             self._connection.execute(
@@ -207,13 +231,14 @@ class AtlasDatabase:
                 self._connection.execute(
                     """
                     INSERT INTO position_plans(
-                        symbol, stop_loss, profit_target, quantity, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
+                        symbol, stop_loss, profit_target, quantity, updated_at, side
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(symbol) DO UPDATE SET
                         stop_loss = excluded.stop_loss,
                         profit_target = excluded.profit_target,
                         quantity = excluded.quantity,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        side = excluded.side
                     """,
                     (
                         str(position_plan["symbol"]).strip().upper(),
@@ -221,6 +246,7 @@ class AtlasDatabase:
                         float(position_plan["profit_target"]),
                         int(position_plan["quantity"]),
                         datetime.now(timezone.utc).isoformat(),
+                        position_plan.get("side") or "LONG",
                     ),
                 )
 
@@ -422,10 +448,7 @@ class AtlasDatabase:
 
     def performance_report(self):
         orders = self.list_paper_orders()
-        closed_fills = [
-            row for row in orders
-            if row["side"] == "SELL"
-        ]
+        closed_fills = [row for row in orders if _fill_closes(row)]
         profits = [
             row["realized_pnl"]
             for row in closed_fills

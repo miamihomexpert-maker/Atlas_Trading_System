@@ -6,10 +6,12 @@ from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
 
 
 class PaperBroker:
-    """In-memory, long-only paper broker. It has no live-broker connection.
+    """In-memory paper broker for longs and shorts. It has no live-broker connection.
 
     Fills enforce risk limits even when ``approved=True``. When a database is
     attached and already has a ledger, cash and positions are rebuilt from it.
+    A short is a positive quantity with side SHORT. Selling a long only reduces
+    that long. Buying a short only covers it.
     """
 
     def __init__(self, initial_cash=100_000.0, database=None):
@@ -44,6 +46,7 @@ class PaperBroker:
                 "quantity": int(row["quantity"]),
                 "price": float(row["price"]),
                 "client_order_id": str(row["order_id"]),
+                "effect": row.get("effect") or None,
             }
             realized_delta = self._apply_position_change(order)
             filled = {
@@ -67,17 +70,16 @@ class PaperBroker:
                 continue
             self._positions[symbol]["stop_loss"] = float(plan["stop_loss"])
             self._positions[symbol]["profit_target"] = float(plan["profit_target"])
+            if plan.get("side") in {"LONG", "SHORT"}:
+                self._positions[symbol]["side"] = plan["side"]
 
     def _reconcile_marks_to_latest_equity(self):
         latest = self._database.latest_equity_snapshot()
         if not latest or not self._positions:
             return
         target_position_value = float(latest["equity"]) - self._cash
-        current_value = sum(
-            position["quantity"] * position["last_price"]
-            for position in self._positions.values()
-        )
-        if current_value <= 0 or target_position_value < 0:
+        current_value = sum(self._signed_value(position) for position in self._positions.values())
+        if current_value == 0 or not isfinite(target_position_value):
             return
         scale = target_position_value / current_value
         if not isfinite(scale) or scale <= 0:
@@ -85,11 +87,20 @@ class PaperBroker:
         for position in self._positions.values():
             position["last_price"] = position["last_price"] * scale
 
+    def _signed_value(self, position):
+        value = position["quantity"] * position["last_price"]
+        if position.get("side", "LONG") == "SHORT":
+            return -value
+        return value
+
+    def _held_side(self, symbol):
+        position = self._positions.get(str(symbol).strip().upper())
+        if position is None:
+            return None
+        return position.get("side", "LONG")
+
     def account_info(self):
-        position_value = sum(
-            position["quantity"] * position["last_price"]
-            for position in self._positions.values()
-        )
+        position_value = sum(self._signed_value(position) for position in self._positions.values())
         return {
             "cash": round(self._cash, 2),
             "buying_power": round(self._cash, 2),
@@ -108,7 +119,7 @@ class PaperBroker:
 
     def current_exposure(self):
         return sum(
-            position["quantity"] * position["last_price"]
+            abs(position["quantity"] * position["last_price"])
             for position in self._positions.values()
         )
 
@@ -170,11 +181,16 @@ class PaperBroker:
             raise ValueError("Order price must be a positive finite number.")
         if not str(client_order_id).strip():
             raise ValueError("A client order ID is required for duplicate prevention.")
-        if side == "SELL":
-            position = self._positions.get(symbol)
-            if position is None or quantity > position["quantity"]:
+        held = self._held_side(symbol)
+        if side == "SELL" and held == "LONG":
+            if quantity > self._positions[symbol]["quantity"]:
                 raise ValueError("SELL quantity exceeds the available long position.")
-        if side == "BUY" and quantity * price > self._cash:
+        if side == "SELL" and held == "SHORT":
+            raise ValueError("SELL does not add to an open short. Buy covers it.")
+        if side == "BUY" and held == "SHORT":
+            if quantity > self._positions[symbol]["quantity"]:
+                raise ValueError("BUY quantity exceeds the open short and does not open a long.")
+        if side == "BUY" and held != "SHORT" and quantity * price > self._cash:
             raise ValueError("BUY order exceeds available paper buying power.")
         return {
             "symbol": symbol,
@@ -184,7 +200,7 @@ class PaperBroker:
             "client_order_id": str(client_order_id).strip(),
         }
 
-    def _maximum_quantity(self, side, price, stop_loss, limits):
+    def _maximum_quantity(self, side, symbol, price, stop_loss, limits):
         if (
             isinstance(stop_loss, bool)
             or not isinstance(stop_loss, (int, float))
@@ -196,20 +212,44 @@ class PaperBroker:
             raise ValueError("BUY orders require stop_loss below the entry price.")
         if side == "SELL" and not stop_loss > price:
             raise ValueError("SELL orders require stop_loss above the entry price.")
+        held = self._held_side(symbol)
+        reducing = (side == "SELL" and held == "LONG") or (side == "BUY" and held == "SHORT")
         equity = self.account_info()["equity"]
-        return calculate_position_size(
+        quantity = calculate_position_size(
             equity,
             price,
             stop_loss,
             limits,
-            current_exposure=self.current_exposure() if side == "BUY" else 0.0,
+            current_exposure=0.0 if reducing else self.current_exposure(),
         )
+        if reducing:
+            quantity = min(quantity, self._positions[symbol]["quantity"])
+        return quantity
+
+    def _resolve_effect(self, order):
+        named = order.get("effect")
+        if named in {"OPEN_LONG", "CLOSE_LONG", "OPEN_SHORT", "CLOSE_SHORT"}:
+            return named
+        held = self._held_side(order["symbol"])
+        if order["side"] == "BUY" and held == "SHORT":
+            return "CLOSE_SHORT"
+        if order["side"] == "BUY":
+            return "OPEN_LONG"
+        if order["side"] == "SELL" and held == "SHORT":
+            raise ValueError("SELL does not add to an open short. Buy covers it.")
+        if order["side"] == "SELL" and held == "LONG":
+            return "CLOSE_LONG"
+        if order["side"] == "SELL":
+            return "OPEN_SHORT"
+        raise ValueError("Paper orders support BUY or SELL only.")
 
     def _apply_position_change(self, order):
         total = order["quantity"] * order["price"]
         symbol = order["symbol"]
+        effect = self._resolve_effect(order)
+        order["effect"] = effect
         realized_delta = 0.0
-        if order["side"] == "BUY":
+        if effect == "OPEN_LONG":
             self._cash -= total
             current = self._positions.get(symbol)
             if current is None:
@@ -217,8 +257,11 @@ class PaperBroker:
                     "quantity": order["quantity"],
                     "average_price": order["price"],
                     "last_price": order["price"],
+                    "side": "LONG",
                 }
             else:
+                if current.get("side", "LONG") != "LONG":
+                    raise ValueError("BUY does not add to an open short.")
                 new_quantity = current["quantity"] + order["quantity"]
                 current["average_price"] = (
                     current["quantity"] * current["average_price"]
@@ -226,33 +269,64 @@ class PaperBroker:
                 ) / new_quantity
                 current["quantity"] = new_quantity
                 current["last_price"] = order["price"]
-        else:
-            current = self._positions[symbol]
+                current["side"] = "LONG"
+        elif effect == "OPEN_SHORT":
+            if symbol in self._positions:
+                raise ValueError("SELL does not open a short while a position is open.")
             self._cash += total
-            realized_delta = (
-                order["price"] - current["average_price"]
-            ) * order["quantity"]
+            self._positions[symbol] = {
+                "quantity": order["quantity"],
+                "average_price": order["price"],
+                "last_price": order["price"],
+                "side": "SHORT",
+            }
+        elif effect == "CLOSE_LONG":
+            current = self._positions[symbol]
+            if current.get("side", "LONG") != "LONG":
+                raise ValueError("SELL closes a long only.")
+            self._cash += total
+            realized_delta = (order["price"] - current["average_price"]) * order["quantity"]
             self._realized_pnl += realized_delta
             current["quantity"] -= order["quantity"]
             if current["quantity"] == 0:
                 del self._positions[symbol]
             else:
                 current["last_price"] = order["price"]
+        elif effect == "CLOSE_SHORT":
+            current = self._positions[symbol]
+            if current.get("side") != "SHORT":
+                raise ValueError("BUY covers a short only.")
+            self._cash -= total
+            realized_delta = (current["average_price"] - order["price"]) * order["quantity"]
+            self._realized_pnl += realized_delta
+            current["quantity"] -= order["quantity"]
+            if current["quantity"] == 0:
+                del self._positions[symbol]
+            else:
+                current["last_price"] = order["price"]
+        else:
+            raise ValueError("Paper fill effect is not recognized.")
         return realized_delta
 
     def _position_plan_after_fill(self, order, stop_loss, profit_target):
         """Remember the latest buy's stop and target. A flat sell clears them."""
         symbol = order["symbol"]
-        if order["side"] == "BUY":
-            if (
-                isinstance(stop_loss, bool)
-                or isinstance(profit_target, bool)
-                or not isinstance(stop_loss, (int, float))
-                or not isinstance(profit_target, (int, float))
-                or not isfinite(stop_loss)
-                or not isfinite(profit_target)
-                or not stop_loss < order["price"] < profit_target
-            ):
+        effect = order.get("effect")
+        if effect in {"OPEN_LONG", "OPEN_SHORT"}:
+            opening_short = effect == "OPEN_SHORT"
+            prices_ok = (
+                not isinstance(stop_loss, bool)
+                and not isinstance(profit_target, bool)
+                and isinstance(stop_loss, (int, float))
+                and isinstance(profit_target, (int, float))
+                and isfinite(stop_loss)
+                and isfinite(profit_target)
+            )
+            if opening_short:
+                prices_ok = prices_ok and profit_target < order["price"] < stop_loss
+            else:
+                prices_ok = prices_ok and stop_loss < order["price"] < profit_target
+            if not prices_ok:
                 return None, None
             position = self._positions[symbol]
             position["stop_loss"] = float(stop_loss)
@@ -262,6 +336,7 @@ class PaperBroker:
                 "stop_loss": position["stop_loss"],
                 "profit_target": position["profit_target"],
                 "quantity": position["quantity"],
+                "side": "SHORT" if opening_short else "LONG",
             }, None
         if symbol not in self._positions:
             return None, symbol
@@ -273,6 +348,7 @@ class PaperBroker:
             "stop_loss": position["stop_loss"],
             "profit_target": position["profit_target"],
             "quantity": position["quantity"],
+            "side": position.get("side", "LONG"),
         }, None
 
     def submit_order(
@@ -317,17 +393,14 @@ class PaperBroker:
             limits,
         ):
             raise PermissionError("Daily loss limit reached; trading is halted.")
+        order["effect"] = self._resolve_effect(order)
         max_quantity = self._maximum_quantity(
             order["side"],
+            order["symbol"],
             order["price"],
             stop_loss,
             limits,
         )
-        if order["side"] == "SELL":
-            max_quantity = min(
-                max_quantity,
-                self._positions.get(order["symbol"], {}).get("quantity", 0),
-            )
         if order["quantity"] > max_quantity:
             raise ValueError("Requested quantity exceeds the configured risk limit.")
 

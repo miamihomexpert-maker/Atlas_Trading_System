@@ -187,6 +187,7 @@ def test_tools_do_not_enable_a_wait_or_invent_a_buy(tmp_path):
     assert 'id="company"' in page
     assert 'id="action-buy"' in page
     assert 'id="action-sell"' in page
-    assert 'scan.buyable ? "" : "disabled"' in page
+    assert 'buyOn ? "" : "disabled"' in page
+    assert 'sellOn ? "" : "disabled"' in page
     assert "No open paper position." in page
     assert "company_copy" in page

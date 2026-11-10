@@ -140,5 +140,6 @@ def test_review_tab_is_present_and_buy_rules_stay():
     assert 'data-panel="review"' in page
     assert "No paper fills to review yet." in page
     assert "scoreboard_note" in page
-    assert 'scan.buyable ? "" : "disabled"' in page
+    assert 'buyOn ? "" : "disabled"' in page
+    assert 'sellOn ? "" : "disabled"' in page
     assert "No open paper position." in page

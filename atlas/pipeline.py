@@ -350,6 +350,20 @@ def run_paper_pipeline(
     if _remote_approval_required(require_remote_approval) and approval_token is None:
         raise PermissionError("Remote approval token is required.")
 
+    held = broker.positions().get(result["symbol"])
+    held_side = None if held is None else held.get("side", "LONG")
+    direction = str(recommendation.get("direction") or "").upper()
+    if direction == "BUY" and held_side == "SHORT":
+        result["execution"] = "NOT_SUBMITTED"
+        result["error"] = (
+            "An open paper short is on. Buy on the dashboard covers it and does not open a long."
+        )
+        return result
+    if direction == "SELL" and held_side == "SHORT":
+        result["execution"] = "NOT_SUBMITTED"
+        result["error"] = "An open paper short is already on. Sell does not add to it."
+        return result
+
     result["order"] = execute_paper_signal(
         recommendation,
         broker,
