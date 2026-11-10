@@ -213,7 +213,7 @@ def test_dashboard_shows_behavior_without_promoting_a_wait(tmp_path):
     assert "not a forecast of profit" in card["behavior"]["disclaimer"]
     assert card["behavior"]["insiders"][0]["effect"] == "context_only"
     page = open("atlas/dashboard_page.html", encoding="utf-8").read()
-    assert 'name="atlas-dashboard-version" content="23"' in page
+    assert 'name="atlas-dashboard-version" content="24"' in page
     assert 'data-tab="behavior"' in page
     assert "#behavior a { color: #ffd56a; text-decoration: underline; }" in page
     assert "SEC Form 4 search" in page

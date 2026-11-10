@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import threading
 from urllib.parse import parse_qs, urlsplit
 import uuid
 
@@ -13,6 +14,13 @@ from atlas.config import LIVE_TRADING
 from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
+from atlas.market_data import (
+    feed_is_paused,
+    feed_status,
+    note_feed_failure,
+    pause_note,
+    take_skips,
+)
 from atlas.market_hours import session_clock
 from atlas.risk import RiskLimits, calculate_position_size, validate_daily_loss
 from atlas.technical import calculate_ema, calculate_rsi, calculate_sma
@@ -82,6 +90,25 @@ def _chart_result(symbol, timeframe, candles, error, chart_only):
     }
 
 
+def _annotate_feed(payload):
+    status = feed_status()
+    payload["feed_paused"] = bool(status)
+    payload["retry_after_seconds"] = status["seconds_remaining"] if status else 0
+    return payload
+
+
+def _candle_skip_message(skips=()):
+    """Short honest line. It does not invent a bar."""
+    note = pause_note() or ""
+    if "timed out" in note.lower() or "timeout" in skips:
+        return "Yahoo history timed out. No bars were returned."
+    if note or "rate_limit" in skips or "paused" in skips:
+        return "Yahoo rate limited. No bars were returned."
+    if "busy" in skips:
+        return "A market-data request is already running. No bars were returned."
+    return "No bars were returned."
+
+
 class PaperDashboard:
     """Local paper-only dashboard. A button click is the human approval."""
 
@@ -128,6 +155,13 @@ class PaperDashboard:
         self._behavior = {}
         self.timeframes = resolve_timeframes()
         self.hard_stop = hard_stop_enabled(hard_stop)
+        self._batch_lock = threading.Lock()
+        self._batch_thread = None
+        self._scan_active = False
+        self._scan_requested = False
+        self._scan_loop_stop = None
+        self._scan_loop_thread = None
+        self._candle_cache = {}
 
     def chart_timeframes(self):
         """Decision timeframes plus display-only intervals. Order is the chart tabs."""
@@ -142,9 +176,103 @@ class PaperDashboard:
         return self._database
 
     def close(self):
+        self.stop_background_scans()
         if self._owns_database and self._database is not None:
             self._database.close()
             self._database = None
+
+    def start_background_scans(self):
+        """Scan on a side thread. Page reads do not wait for it."""
+        if self.histories_by_symbol is not None:
+            return
+        if self._scan_loop_thread is not None and self._scan_loop_thread.is_alive():
+            return
+        self._scan_loop_stop = threading.Event()
+        self._scan_loop_thread = threading.Thread(
+            target=self._scan_loop,
+            name="atlas-scan-loop",
+            daemon=True,
+        )
+        self._scan_loop_thread.start()
+
+    def stop_background_scans(self):
+        if self._scan_loop_stop is not None:
+            self._scan_loop_stop.set()
+        loop = self._scan_loop_thread
+        if loop is not None and loop.is_alive() and threading.current_thread() is not loop:
+            loop.join(timeout=1)
+
+    def _scan_loop(self):
+        stop = self._scan_loop_stop
+        while stop is not None and not stop.wait(2):
+            if feed_is_paused():
+                continue
+            if self._scan_requested or self._scan_batch_due():
+                self._scan_requested = False
+                self._locked_scan()
+
+    def request_scan(self):
+        """Ask for one batch. Returns before Yahoo is called.
+
+        A rate-limited feed records a zero-score pass and leaves stored cards.
+        """
+        if feed_is_paused():
+            if self._batch_lock.acquire(blocking=False):
+                try:
+                    self._record_scored_pass(0)
+                finally:
+                    self._batch_lock.release()
+            return "paused"
+        self._scan_requested = True
+        if self._scan_loop_thread is not None and self._scan_loop_thread.is_alive():
+            return "started"
+        if self._batch_thread is not None and self._batch_thread.is_alive():
+            return "running"
+        self._batch_thread = threading.Thread(
+            target=self._locked_scan,
+            name="atlas-scan",
+            daemon=True,
+        )
+        self._batch_thread.start()
+        return "started"
+
+    def scan_pending(self):
+        if self._scan_active:
+            return True
+        if self._batch_thread is not None and self._batch_thread.is_alive():
+            return True
+        return bool(self._scan_requested) and not feed_is_paused()
+
+    def wait_for_scan(self, timeout=5):
+        thread = self._batch_thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
+
+    def market_note(self):
+        note = pause_note()
+        if note:
+            return note
+        if self.scan_pending():
+            return "A scan is running. Stored cards stay up until it finishes."
+        return None
+
+    def _locked_scan(self):
+        if not self._batch_lock.acquire(blocking=False):
+            return
+        self._scan_active = True
+        try:
+            self._scan_requested = False
+            if feed_is_paused():
+                self._record_scored_pass(0)
+                return
+            self._scan_one_batch()
+        except Exception as error:
+            logger.info("Scan batch skipped: %s", error)
+        finally:
+            self._scan_active = False
+            self._batch_lock.release()
 
     def _guard(self, token):
         if LIVE_TRADING or self.settings.live_trading_enabled:
@@ -586,54 +714,106 @@ class PaperDashboard:
         age = (datetime.now(timezone.utc) - when).total_seconds()
         return age >= max(limit, 1)
 
-    def _scan_one_batch(self):
+    def _stops_requested(self):
+        return self._scan_loop_stop is not None and self._scan_loop_stop.is_set()
+
+    def _record_scored_pass(self, scored):
+        """Remember how many names this pass actually scored. Cards stay put."""
         universe = list(self.settings.instruments)
-        start = int(self.database.get_metadata("scan_batch_index") or 0)
-        batch, nxt = next_batch(universe, start, scan_batch_size())
-        self.database.set_metadata("scan_batch_index", str(nxt))
-        self.database.set_metadata("scan_batch_at", datetime.now(timezone.utc).isoformat())
-        if not self._news_explicit:
-            self.news_events, self.news_report = resolve_news(batch)
-        broker = self._broker()
-        if auto_train_enabled():
-            train = batch[:1] if len(universe) > scan_batch_size() else batch
-            ensure_baseline_model(self.database, train)
-        for symbol in batch:
-            try:
-                histories = self._histories(symbol)
-            except Exception as error:
-                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
-                continue
-            if not histories:
-                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, "No market bars returned."))
-                continue
-            try:
-                preview = self._preview(symbol, broker, histories)
-            except Exception as error:
-                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
-                continue
-            card = _scan_card(symbol, preview, broker)
-            self._record_observation(card, histories)
-            self._learn(symbol, histories)
-            card = self._described(card, histories)
-            self.database.upsert_symbol_scan(symbol, card)
         stored = {card["symbol"] for card in self.database.list_symbol_scans()}
         self.database.set_metadata(
             "scan_coverage",
             json.dumps({
                 "universe_size": len(set(universe)),
                 "scanned_count": len(stored & set(universe)),
-                "batch_count": len(batch),
+                "batch_count": int(scored),
                 "source": "config/sp500.txt",
             }),
         )
 
-    def _candidates_from_universe(self, force_scan=False):
-        if force_scan or self._scan_batch_due():
+    def _feed_blocked(self, skips):
+        if feed_is_paused():
+            return True
+        return any(reason in {"paused", "rate_limit", "timeout", "busy"} for reason in skips)
+
+    def _scan_one_batch(self):
+        universe = list(self.settings.instruments)
+        if feed_is_paused():
+            self._record_scored_pass(0)
+            return
+        start = int(self.database.get_metadata("scan_batch_index") or 0)
+        batch, _nxt = next_batch(universe, start, scan_batch_size())
+        if not batch:
+            self.database.set_metadata("scan_batch_at", datetime.now(timezone.utc).isoformat())
+            self._record_scored_pass(0)
+            return
+        if not self._news_explicit:
+            self.news_events, self.news_report = resolve_news(batch)
+            if feed_is_paused():
+                self._record_scored_pass(0)
+                return
+        broker = self._broker()
+        if auto_train_enabled() and not feed_is_paused():
+            train = batch[:1] if len(universe) > scan_batch_size() else batch
+            ensure_baseline_model(self.database, train)
+            if feed_is_paused():
+                self._record_scored_pass(0)
+                return
+        finished = 0
+        scored = 0
+        for symbol in batch:
+            if self._stops_requested() or feed_is_paused():
+                break
+            take_skips()
             try:
-                self._scan_one_batch()
+                histories = self._histories(symbol)
             except Exception as error:
-                logger.info("Scan batch skipped: %s", error)
+                if note_feed_failure(error) or feed_is_paused():
+                    break
+                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
+                finished += 1
+                scored += 1
+                continue
+            if self._feed_blocked(take_skips()):
+                break
+            if not histories:
+                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, "No market bars returned."))
+                finished += 1
+                scored += 1
+                continue
+            try:
+                preview = self._preview(symbol, broker, histories)
+            except Exception as error:
+                if note_feed_failure(error) or feed_is_paused():
+                    break
+                self.database.upsert_symbol_scan(symbol, _empty_scan(symbol, str(error)))
+                finished += 1
+                scored += 1
+                continue
+            if feed_is_paused():
+                break
+            card = _scan_card(symbol, preview, broker)
+            self._record_observation(card, histories)
+            self._learn(symbol, histories)
+            card = self._described(card, histories)
+            self.database.upsert_symbol_scan(symbol, card)
+            finished += 1
+            scored += 1
+        if finished and universe:
+            self.database.set_metadata(
+                "scan_batch_index",
+                str((start + finished) % len(universe)),
+            )
+            self.database.set_metadata(
+                "scan_batch_at",
+                datetime.now(timezone.utc).isoformat(),
+            )
+        self._record_scored_pass(scored)
+
+    def _candidates_from_universe(self, force_scan=False):
+        # A page read never waits on Yahoo. Refresh now only queues a batch.
+        if force_scan:
+            self.request_scan()
         broker = self._broker()
         equity = broker.account_info()["equity"]
         exposure = broker.current_exposure()
@@ -661,7 +841,7 @@ class PaperDashboard:
             sized.append(card)
         sized = self._with_learning_bias(sized)
         ranked = rank_scans(sized)
-        top = [self._described(dict(card)) for card in ranked[:3]]
+        top = [self._present_stored(card) for card in ranked[:3]]
         shown = list(top)
         seen = {card["symbol"] for card in shown}
         for symbol in broker.positions():
@@ -669,7 +849,7 @@ class PaperDashboard:
                 continue
             match = next((card for card in sized if card["symbol"] == symbol), None)
             if match is not None:
-                shown.append(self._described(dict(match)))
+                shown.append(self._present_stored(match))
         qualified = [card for card in ranked if card.get("buyable")]
         coverage = json.loads(self.database.get_metadata("scan_coverage") or "{}")
         return {
@@ -685,6 +865,35 @@ class PaperDashboard:
             ),
         }
 
+    def _present_stored(self, card):
+        """Refresh wording from fields already stored. Does not fetch."""
+        card = dict(card)
+        card["technical_copy"] = describe_technicals(card)
+        card["links"] = _outbound_links(card)
+        company = card.get("company") if isinstance(card.get("company"), dict) else None
+        if company is not None:
+            card["company_copy"] = describe_company(company)
+        card["copy"] = describe_scan(card)
+        return card
+
+    def review_for_state(self):
+        """Saved review, or the ledger with no new bar download."""
+        if self.histories_by_symbol is not None:
+            return self.review()
+        raw = self.database.get_metadata("paper_review")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and "fills" in parsed and "decisions" in parsed:
+                return parsed
+        return build_review(
+            self.database.list_paper_orders(),
+            self.database.list_scan_observations(),
+            {},
+        )
+
     def candles(self, symbol, timeframe):
         normalized = str(symbol).strip().upper()
         allowed = set(self.settings.instruments) | set(self._broker().positions())
@@ -694,6 +903,14 @@ class PaperDashboard:
         if requested not in self.chart_timeframes():
             raise ValueError("Timeframe is not available for the chart.")
         chart_only = requested not in self.timeframes
+        if self.candle_loader is None and feed_is_paused():
+            return self._cached_or_empty(
+                normalized,
+                requested,
+                _candle_skip_message(),
+                chart_only,
+            )
+        take_skips()
         try:
             if self.candle_loader is not None:
                 frame = self.candle_loader(normalized, requested)
@@ -701,16 +918,38 @@ class PaperDashboard:
                 histories = fetch_session_histories(normalized, (requested,))
                 frame = histories.get(requested) if histories else None
         except Exception as error:
+            note_feed_failure(error)
             logger.info("%s %s chart bars skipped: %s", normalized, requested, error)
-            return _chart_result(normalized, requested, [], str(error), chart_only)
+            if feed_is_paused():
+                return self._cached_or_empty(
+                    normalized,
+                    requested,
+                    _candle_skip_message(),
+                    chart_only,
+                )
+            return _annotate_feed(_chart_result(
+                normalized,
+                requested,
+                [],
+                str(error),
+                chart_only,
+            ))
+        skips = take_skips()
         if frame is None or getattr(frame, "empty", True):
-            return _chart_result(
+            if self.candle_loader is None and self._feed_blocked(skips):
+                return self._cached_or_empty(
+                    normalized,
+                    requested,
+                    _candle_skip_message(skips),
+                    chart_only,
+                )
+            return _annotate_feed(_chart_result(
                 normalized,
                 requested,
                 [],
                 "No bars returned for this symbol and timeframe.",
                 chart_only,
-            )
+            ))
         shown = frame.tail(300)
         sma = calculate_sma(shown)
         ema = calculate_ema(shown)
@@ -729,7 +968,21 @@ class PaperDashboard:
                 "ema": _finite_number(ema.iloc[offset]),
                 "rsi": _finite_number(rsi.iloc[offset]),
             })
-        return _chart_result(normalized, requested, candles, None, chart_only)
+        payload = _chart_result(normalized, requested, candles, None, chart_only)
+        self._candle_cache[(normalized, requested)] = payload
+        return _annotate_feed(payload)
+
+    def _cached_or_empty(self, symbol, timeframe, error, chart_only):
+        cached = self._candle_cache.get((symbol, timeframe))
+        if cached and cached.get("candles"):
+            payload = dict(cached)
+            payload["candles"] = list(cached["candles"])
+            payload["error"] = error.replace(
+                "No bars were returned.",
+                "Showing the last bars returned.",
+            )
+            return _annotate_feed(payload)
+        return _annotate_feed(_chart_result(symbol, timeframe, [], error, chart_only))
 
     def buy(self, token, symbol):
         self._guard(token)
@@ -1004,13 +1257,18 @@ class PaperDashboard:
 
 def lookup_instrument_name(symbol):
     """Return Yahoo's short or long name when the feed includes one."""
-    try:
+    from atlas.market_data import call_yahoo, feed_is_paused
+
+    if feed_is_paused():
+        return None
+
+    def read():
         import yfinance as yf
 
-        info = getattr(yf.Ticker(str(symbol).strip().upper()), "info", None) or {}
-    except Exception:
-        return None
-    if not isinstance(info, dict):
+        return getattr(yf.Ticker(str(symbol).strip().upper()), "info", None) or {}
+
+    info, error = call_yahoo(read)
+    if error is not None or not isinstance(info, dict):
         return None
     for key in ("shortName", "longName"):
         value = info.get(key)
@@ -1481,7 +1739,7 @@ def _state_payload(service, force_scan=False):
         logger.info("Clock read failed: %s", error)
         clock = None
     try:
-        review = service.review()
+        review = service.review_for_state()
     except Exception as error:
         logger.info("Review read failed: %s", error)
         review = {
@@ -1491,6 +1749,7 @@ def _state_payload(service, force_scan=False):
             "scoreboard_note": str(error),
             "model": {"note": str(error), "graded": 0, "matched": 0},
         }
+    status = feed_status()
     return {
         "portfolio": portfolio,
         "candidates": ranked["candidates"],
@@ -1503,6 +1762,10 @@ def _state_payload(service, force_scan=False):
         "review": review,
         "chart_timeframes": _chart_timeframes(service),
         "chart_refresh_seconds": CHART_REFRESH_SECONDS,
+        "market_note": service.market_note(),
+        "scan_pending": service.scan_pending(),
+        "feed_paused": bool(status),
+        "feed_retry_after_seconds": status["seconds_remaining"] if status else 0,
     }
 
 
@@ -1615,6 +1878,7 @@ def serve_dashboard(port=None, service=None):
             name_loader=lookup_instrument_name,
         )
     _DashboardHandler.service = service
+    service.start_background_scans()
     server = ThreadingHTTPServer(("127.0.0.1", port), _DashboardHandler)
     host, bound_port = server.server_address
     logger.info(
