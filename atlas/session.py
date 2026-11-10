@@ -16,6 +16,8 @@ from config.settings import load_settings
 logger = get_logger()
 
 _TIMEFRAME_PERIODS = {
+    # 1m is chart display only. Decision timeframes stay on ATLAS_TIMEFRAMES.
+    "1m": "5d",
     "5m": "5d",
     "15m": "5d",
     "30m": "1mo",

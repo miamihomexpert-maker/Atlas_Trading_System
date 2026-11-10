@@ -136,3 +136,5 @@ def test_relevant_news_tab_links_only_real_fields():
     assert "Open the video" in page
     assert "Yahoo quote page" in page
     assert "youtube.com" not in page
+    assert "#news a { color: #ffd56a; text-decoration: underline; }" in page
+    assert "#news h3, #news p, #news .clip { color: #f7fbff; }" in page
