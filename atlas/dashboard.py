@@ -547,6 +547,7 @@ class PaperDashboard:
                 "effect": row.get("effect"),
                 "quantity": row["quantity"],
                 "price": row["price"],
+                "reason": row.get("reason"),
             })
         return {
             "mode": "PAPER",
@@ -563,6 +564,17 @@ class PaperDashboard:
             "timeframes": list(self.timeframes),
             "risk": _risk_usage(account, daily, broker.current_exposure(), halted),
         }
+
+    def day_trades(self, now=None):
+        """Open paper positions and today's closes. Does not submit an order."""
+        from atlas.day_trades import build_day_trades
+
+        broker = self._broker()
+        return build_day_trades(
+            broker.positions(),
+            self.database.list_paper_orders(),
+            now,
+        )
 
     def clock(self, now=None):
         return session_clock(now)
@@ -984,7 +996,7 @@ class PaperDashboard:
             return _annotate_feed(payload)
         return _annotate_feed(_chart_result(symbol, timeframe, [], error, chart_only))
 
-    def buy(self, token, symbol):
+    def buy(self, token, symbol, cover_only=False):
         self._guard(token)
         normalized = str(symbol).strip().upper()
         clicked_at = self._audit("DASHBOARD_BUY_CLICK", normalized, {})
@@ -992,6 +1004,11 @@ class PaperDashboard:
         held = broker.positions().get(normalized)
         if held is not None and held.get("side") == "SHORT":
             return self._cover_short(normalized, broker, clicked_at)
+        if cover_only:
+            self._audit("DASHBOARD_COVER_REJECTED", normalized, {"reason": "no short"})
+            raise ValueError(
+                f"{normalized} has no open paper short. Buy to cover does not open a long."
+            )
         histories = self._histories(normalized)
         if not histories:
             self._audit("DASHBOARD_BUY_REJECTED", normalized, {"reason": "no bars"})
@@ -1134,7 +1151,7 @@ class PaperDashboard:
         )
         return {"ok": True, "order": _public_order(order)}
 
-    def sell(self, token, symbol, alert_id=None):
+    def sell(self, token, symbol, alert_id=None, close_only=False):
         self._guard(token)
         normalized = str(symbol).strip().upper()
         action = "DASHBOARD_SELL_CLICK" if alert_id is None else "DASHBOARD_EXIT_ACCEPTED"
@@ -1147,6 +1164,11 @@ class PaperDashboard:
             raise ValueError(f"{normalized} is already a paper short. Buy covers it.")
         if held_side == "LONG":
             return self._close_long(normalized, broker, clicked_at, alert_id)
+        if close_only:
+            self._audit("DASHBOARD_SELL_REJECTED", normalized, {"reason": "no long"})
+            raise ValueError(
+                f"{normalized} has no open paper long. Sell on Today's trades does not open a short."
+            )
         histories = self._histories(normalized)
         if not histories:
             self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": "no bars"})
@@ -1750,6 +1772,15 @@ def _state_payload(service, force_scan=False):
             "model": {"note": str(error), "graded": 0, "matched": 0},
         }
     status = feed_status()
+    try:
+        day_trades = service.day_trades()
+    except Exception as error:
+        logger.info("Day trades read failed: %s", error)
+        day_trades = {
+            "rows": [],
+            "note": "No paper positions or same-day trades.",
+            "error": str(error),
+        }
     return {
         "portfolio": portfolio,
         "candidates": ranked["candidates"],
@@ -1766,6 +1797,7 @@ def _state_payload(service, force_scan=False):
         "scan_pending": service.scan_pending(),
         "feed_paused": bool(status),
         "feed_retry_after_seconds": status["seconds_remaining"] if status else 0,
+        "day_trades": day_trades,
     }
 
 
@@ -1839,9 +1871,17 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             if path == "/api/buy":
-                result = self.service.buy(self.service.token, body.get("symbol"))
+                result = self.service.buy(
+                    self.service.token,
+                    body.get("symbol"),
+                    cover_only=bool(body.get("cover_only")),
+                )
             elif path == "/api/sell":
-                result = self.service.sell(self.service.token, body.get("symbol"))
+                result = self.service.sell(
+                    self.service.token,
+                    body.get("symbol"),
+                    close_only=bool(body.get("close_only")),
+                )
             elif path == "/api/alerts/accept":
                 result = self.service.accept_alert(self.service.token, body.get("alert_id"))
             else:

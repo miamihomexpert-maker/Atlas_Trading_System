@@ -74,6 +74,27 @@ def session_clock(now=None):
     }
 
 
+def as_new_york(now):
+    """Convert an aware datetime to America/New_York."""
+    if now.tzinfo is None:
+        raise ValueError("now must include a timezone.")
+    return now.astimezone(_new_york())
+
+
+def seconds_until_regular_close(now):
+    """Seconds until 16:00 America/New_York, when that close is still ahead today.
+
+    Returns None on a weekend and when the clock is already at or after the close.
+    """
+    eastern = as_new_york(now)
+    if eastern.weekday() >= 5:
+        return None
+    remaining = (_at_clock(eastern, 16, 0) - eastern).total_seconds()
+    if remaining <= 0:
+        return None
+    return remaining
+
+
 def _at_clock(eastern, hour, minute):
     return eastern.replace(hour=hour, minute=minute, second=0, microsecond=0)
 

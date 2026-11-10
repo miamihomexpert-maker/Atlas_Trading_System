@@ -21,6 +21,7 @@ LAYOUT_LIMITS = {
     "reader": (280, 640),
 }
 TAB_IDS = (
+    "trades",
     "predictions",
     "investors",
     "signals",

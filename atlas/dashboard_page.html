@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="24">
+<meta name="atlas-dashboard-version" content="25">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -263,6 +263,7 @@
     </div>
   </section>
   <nav class="tab-rail" aria-label="More about the selected symbol">
+    <button type="button" data-tab="trades">Today's trades</button>
     <button type="button" data-tab="predictions">Predictions</button>
     <button type="button" data-tab="investors">Investors</button>
     <button type="button" data-tab="signals">Signals</button>
@@ -282,6 +283,7 @@
       <button id="reader-close" type="button">Close</button>
     </div>
     <div class="reader-body">
+      <div class="reader-panel" id="trades" data-panel="trades"><h2>TODAY'S TRADES</h2><p class="muted">No paper positions or same-day trades.</p></div>
       <div class="reader-panel" id="predictions" data-panel="predictions"><h2>PREDICTIONS</h2><p class="muted">Select a symbol. This is the main read of public stockholder behavior. It is not a forecast of profit.</p></div>
       <div class="reader-panel" id="investors" data-panel="investors"><h2>INVESTORS</h2><p class="muted">Select a symbol. Only investors the public feed returned are listed. None is filled in.</p></div>
       <div class="reader-panel subpanel" id="signals" data-panel="signals"><h2>SIGNALS</h2><p class="muted">Waiting for the scan.</p></div>
@@ -755,10 +757,10 @@ function renderPortfolio(portfolio) {
     </div>`;
   }).join("") : `<p class="muted">No open paper positions.</p>`;
   document.querySelectorAll("[data-sell]").forEach((button) => {
-    button.onclick = () => askSell(button.dataset.sell);
+    button.onclick = () => askSell(button.dataset.sell, true);
   });
   document.querySelectorAll("[data-cover]").forEach((button) => {
-    button.onclick = () => askBuy(button.dataset.cover);
+    button.onclick = () => askBuy(button.dataset.cover, true);
   });
   const fills = portfolio.recent_fills || [];
   document.getElementById("fills").innerHTML = fills.length
@@ -1167,7 +1169,44 @@ function fillLabel(fill) {
     OPEN_SHORT: "open short",
     CLOSE_SHORT: "cover short",
   }[fill.effect];
-  return effect ? `${fill.side} ${effect}` : text(fill.side);
+  const base = effect ? `${fill.side} ${effect}` : text(fill.side);
+  return fill.reason ? `${base} · ${fill.reason}` : base;
+}
+function renderDayTrades(report) {
+  const host = document.getElementById("trades");
+  if (!host) return;
+  const rows = (report && report.rows) || [];
+  const note = (report && report.note) || "No paper positions or same-day trades.";
+  if (!rows.length) {
+    host.innerHTML = `<h2>TODAY'S TRADES</h2><p class="muted">${text(note)}</p>`;
+    return;
+  }
+  host.innerHTML = `<h2>TODAY'S TRADES</h2><p class="muted">${text(note)}</p>` + rows.map((row) => {
+    const side = row.side === "SHORT" ? "short" : "long";
+    const status = row.closed ? "Closed" : "Open";
+    let action = "";
+    if (!row.closed && row.action === "sell") {
+      action = `<button class="sell" type="button" data-day-sell="${row.symbol}">Sell</button>`;
+    } else if (!row.closed && row.action === "cover") {
+      action = `<button class="buy" type="button" data-day-cover="${row.symbol}">Buy to cover</button>`;
+    }
+    const closedLine = row.closed
+      ? `<div>${text(row.reason || "Closed.")}${row.close_price == null ? "" : " Fill " + money(row.close_price) + "."}</div>`
+      : "";
+    return `
+      <article class="clip">
+        <strong>${text(row.symbol)} · ${side} · ${status}</strong>
+        <div>Size ${text(row.quantity)} · price ${money(row.price)}</div>
+        ${closedLine}
+        ${action}
+      </article>`;
+  }).join("");
+  host.querySelectorAll("[data-day-sell]").forEach((button) => {
+    button.onclick = () => askSell(button.dataset.daySell, true);
+  });
+  host.querySelectorAll("[data-day-cover]").forEach((button) => {
+    button.onclick = () => askBuy(button.dataset.dayCover, true);
+  });
 }
 function renderActions() {
   const host = document.getElementById("trade-actions");
@@ -1263,8 +1302,8 @@ function renderAlerts(alerts) {
   });
 }
 
-async function askBuy(symbol) {
-  const covering = heldSide(symbol) === "SHORT";
+async function askBuy(symbol, coverOnly) {
+  const covering = !!coverOnly || heldSide(symbol) === "SHORT";
   const ok = await confirmTrade(
     covering ? "CONFIRM PAPER COVER" : "CONFIRM PAPER BUY",
     covering
@@ -1272,11 +1311,11 @@ async function askBuy(symbol) {
       : `Submit a paper buy for ${symbol}? The server re-checks the signal, risk limits, and the daily-loss halt. Live trading stays off.`
   );
   if (!ok) return;
-  try { await post("/api/buy", { symbol }); await refresh(); }
+  try { await post("/api/buy", coverOnly ? { symbol, cover_only: true } : { symbol }); await refresh(); }
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
-async function askSell(symbol) {
-  const closing = heldSide(symbol) === "LONG";
+async function askSell(symbol, closeOnly) {
+  const closing = !!closeOnly || heldSide(symbol) === "LONG";
   const ok = await confirmTrade(
     closing ? "CONFIRM PAPER SELL" : "CONFIRM PAPER SHORT",
     closing
@@ -1284,7 +1323,7 @@ async function askSell(symbol) {
       : `Submit a paper short for ${symbol}? The server re-checks that the scan is a real sell and that the risk size is above zero. A wait is not a short. Live trading stays off.`
   );
   if (!ok) return;
-  try { await post("/api/sell", { symbol }); await refresh(); }
+  try { await post("/api/sell", closeOnly ? { symbol, close_only: true } : { symbol }); await refresh(); }
   catch (error) { document.getElementById("candidate-note").textContent = error.message; }
 }
 async function askAlert(alertId, symbol) {
@@ -1319,6 +1358,7 @@ async function refresh(forceScan) {
   renderActions();
   renderAlerts(payload.alerts || []);
   renderReview(payload.review);
+  renderDayTrades(payload.day_trades);
   if (payload.feed_paused && Number(payload.feed_retry_after_seconds) > 0) {
     state.feedPausedUntil = Date.now() + Number(payload.feed_retry_after_seconds) * 1000;
   } else if (!payload.feed_paused) {
@@ -1346,8 +1386,9 @@ const LAYOUT_KEY = "atlas-paper-layout";
 const TAB_KEY = "atlas-paper-tab";
 const LAYOUT_DEFAULTS = { left: 260, right: 320, reader: 380 };
 const LAYOUT_LIMITS = { left: [200, 520], right: [240, 560], reader: [280, 640] };
-const TAB_IDS = ["predictions", "investors", "signals", "technicals", "news", "model", "company", "behavior", "risk", "sells", "review"];
+const TAB_IDS = ["trades", "predictions", "investors", "signals", "technicals", "news", "model", "company", "behavior", "risk", "sells", "review"];
 const TAB_LABELS = {
+  trades: "Today's trades",
   predictions: "Predictions",
   investors: "Investors",
   signals: "Signals",
