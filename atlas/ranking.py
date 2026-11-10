@@ -1,8 +1,8 @@
 """Order scan cards with the fields the pipeline already produced.
 
-Risk-sizable BUY names come first, then other BUY names, then WAIT, then
-SELL, then anything without a decision. Confidence is the existing strategy
-confidence. Nothing here is an expected return.
+Risk-sizable BUY and SELL names come first, then other BUY names, then WAIT,
+then other SELL names, then anything without a decision. Confidence is the
+existing strategy confidence. Nothing here is an expected return.
 """
 
 
@@ -20,7 +20,9 @@ def top_scans(cards, limit=3):
 
 def _rank_key(card):
     decision = str(card.get("decision") or "").upper()
-    if card.get("buyable") and decision == "BUY":
+    if (card.get("buyable") and decision == "BUY") or (
+        card.get("shortable") and decision == "SELL"
+    ):
         tier = 0
     else:
         tier = _TIER.get(decision, 4)
@@ -40,7 +42,7 @@ def card_from_pipeline(result, equity, exposure):
     recommendation = result.get("recommendation") or {}
     decision = result.get("decision") or result.get("status") or "NO_DATA"
     entry = stop = target = quantity = None
-    if decision == "BUY" and recommendation:
+    if decision in {"BUY", "SELL"} and recommendation:
         entry = recommendation.get("entry_price")
         stop = recommendation.get("stop_loss")
         target = recommendation.get("profit_target")
@@ -66,6 +68,7 @@ def card_from_pipeline(result, equity, exposure):
         "confidence": _confidence(result),
         "reasons": [analysis.get("reason")] if analysis.get("reason") else [],
         "buyable": decision == "BUY" and isinstance(quantity, int) and quantity > 0,
+        "shortable": decision == "SELL" and isinstance(quantity, int) and quantity > 0,
         "agreement": analysis.get("agreement"),
         "scanned_at": result.get("scanned_at"),
         "timeframes": {},

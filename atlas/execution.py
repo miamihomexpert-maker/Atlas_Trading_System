@@ -95,23 +95,27 @@ def execute_paper_signal(
 
     positions = broker.positions()
     current_exposure = sum(
-        position["quantity"] * position["last_price"]
+        abs(position["quantity"] * position["last_price"])
         for position in positions.values()
     )
+    held = positions.get(symbol)
+    held_side = None if held is None else held.get("side", "LONG")
+    if side == "SELL" and held_side == "SHORT":
+        raise ValueError("SELL does not add to an open short. Buy covers it.")
+    if side == "BUY" and held_side == "SHORT" and quantity is not None and quantity > held["quantity"]:
+        raise ValueError("BUY quantity exceeds the open short and does not open a long.")
+    reducing = (side == "SELL" and held_side == "LONG") or (side == "BUY" and held_side == "SHORT")
     risk_quantity = calculate_position_size(
         equity,
         entry,
         stop,
         limits,
-        current_exposure=current_exposure if side == "BUY" else 0.0,
+        current_exposure=0.0 if reducing else current_exposure,
     )
     if quantity is None:
         quantity = risk_quantity
-        if side == "SELL":
-            quantity = min(
-                quantity,
-                positions.get(symbol, {}).get("quantity", 0),
-            )
+        if reducing:
+            quantity = min(quantity, held["quantity"])
     elif (
         isinstance(quantity, bool)
         or not isinstance(quantity, int)
@@ -142,7 +146,7 @@ def execute_paper_signal(
         client_order_id=client_order_id,
         approved=True,
         stop_loss=float(stop),
-        profit_target=float(target) if side == "BUY" else None,
+        profit_target=float(target) if side == "BUY" or (side == "SELL" and held_side is None) else None,
         limits=limits,
     )
     if remote_approval:
