@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="17">
+<meta name="atlas-dashboard-version" content="18">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -146,6 +146,13 @@
   .decision.WAIT, .decision.NO_DATA { color: var(--amber); }
   .buy { border-color: var(--up); color: var(--up); }
   .sell { border-color: var(--down); color: var(--down); }
+  #action-buy, #action-sell {
+    font-size: 18px;
+    font-weight: 700;
+    padding: 14px 28px;
+    min-width: 112px;
+    letter-spacing: 0.04em;
+  }
   .alert { border: 1px solid var(--amber); padding: 8px; margin-bottom: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   td { padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); vertical-align: top; }
