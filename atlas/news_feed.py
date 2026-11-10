@@ -112,6 +112,15 @@ def fetch_headlines(symbols, ticker_factory=None):
     """Pull Yahoo headlines for each symbol. Failures stay empty and named."""
     import yfinance as yf
 
+    from atlas.market_data import call_yahoo, feed_is_paused, pause_note
+
+    if feed_is_paused():
+        return [], {
+            "status": "FETCH_FAILED",
+            "error": pause_note(),
+            "source": "yfinance Ticker.news",
+            "event_count": 0,
+        }
     factory = ticker_factory or (lambda symbol: yf.Ticker(symbol))
     events = []
     errors = []
@@ -120,9 +129,11 @@ def fetch_headlines(symbols, ticker_factory=None):
         normalized = str(symbol).strip().upper()
         if not normalized:
             continue
-        try:
-            payload = factory(normalized).news
-        except Exception as error:
+        if feed_is_paused():
+            errors.append(f"{normalized}: {pause_note()}")
+            continue
+        payload, error = call_yahoo(lambda symbol=normalized: factory(symbol).news)
+        if error is not None:
             errors.append(f"{normalized}: {error}")
             continue
         if not isinstance(payload, list):

@@ -303,6 +303,8 @@ def test_one_bad_symbol_does_not_blank_dashboard_state(tmp_path, monkeypatch):
     assert payload["clock"]["timezone"] == "America/New_York"
     assert payload["portfolio"]["mode"] == "PAPER"
     assert payload["portfolio"]["cash"] == 10_000
+    assert service.wait_for_scan(5)
+    payload = _state_payload(service)
     stored = {card["symbol"]: card for card in database.list_symbol_scans()}
     assert stored["AAA"]["decision"] == "NO_DATA"
     assert "invalid OHLCV" in stored["AAA"]["reason"]
@@ -394,11 +396,12 @@ def test_minute_chart_is_display_only(tmp_path, monkeypatch):
 
 def test_chart_poll_does_not_scan_and_news_text_is_readable():
     page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
-    assert 'name="atlas-dashboard-version" content="23"' in page
+    assert 'name="atlas-dashboard-version" content="24"' in page
     assert "const CHART_REFRESH_MS = 15000;" in page
     start = page.index("if (!sessionStillOpen()) return;")
     block = page[start:page.index("CHART_REFRESH_MS);", start)]
     assert "loadCandles({ live: true })" in block
+    assert "feedPausedUntil" in block
     assert "scan=1" not in block
     assert "/api/state" not in block
     assert "#news a { color: #ffd56a; text-decoration: underline; }" in page

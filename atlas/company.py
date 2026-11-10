@@ -146,13 +146,27 @@ def load_company_facts(symbol, ticker_factory=None, now=None):
             error="No symbol was provided.",
             fetched_at=fetched_at,
         )
+    from atlas.market_data import call_yahoo, feed_is_paused, pause_note
+
+    if feed_is_paused():
+        return blank_profile(
+            normalized,
+            status="FETCH_FAILED",
+            error=pause_note(),
+            source="yfinance Ticker",
+            fetched_at=fetched_at,
+        )
     if ticker_factory is None:
         import yfinance as yf
 
         ticker_factory = yf.Ticker
-    try:
+
+    def read():
         ticker = ticker_factory(normalized)
-    except Exception as error:
+        return _read_ticker(normalized, ticker, fetched_at)
+
+    profile, error = call_yahoo(read)
+    if error is not None:
         return blank_profile(
             normalized,
             status="FETCH_FAILED",
@@ -160,7 +174,15 @@ def load_company_facts(symbol, ticker_factory=None, now=None):
             source="yfinance Ticker",
             fetched_at=fetched_at,
         )
-    return _read_ticker(normalized, ticker, fetched_at)
+    if not isinstance(profile, dict):
+        return blank_profile(
+            normalized,
+            status="FETCH_FAILED",
+            error="Company loader did not return a profile.",
+            source="yfinance Ticker",
+            fetched_at=fetched_at,
+        )
+    return profile
 
 
 def describe_company(profile):

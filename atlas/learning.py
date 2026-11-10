@@ -222,25 +222,26 @@ def stamp_learning_bias(cards, events_by_symbol):
 
 def load_public_behavior(symbol, ticker_factory=None, now=None):
     """Read insider transactions and institutional holders. Empty stays empty."""
+    from atlas.market_data import call_yahoo, feed_is_paused, pause_note
+
     normalized = str(symbol).strip().upper()
     fetched_at = _stamp(now)
+    if feed_is_paused():
+        return _failed(normalized, pause_note() or "Yahoo requests are paused.", fetched_at)
     if ticker_factory is None:
         import yfinance as yf
 
         ticker_factory = yf.Ticker
-    try:
-        ticker = ticker_factory(normalized)
-    except Exception as error:
+    ticker, error = call_yahoo(lambda: ticker_factory(normalized))
+    if error is not None:
         return _failed(normalized, str(error), fetched_at)
     insider_error = holder_error = None
-    try:
-        insider_frame = _read_frame(ticker, "insider_transactions")
-    except Exception as error:
+    insider_frame, error = call_yahoo(lambda: _read_frame(ticker, "insider_transactions"))
+    if error is not None:
         insider_frame = None
         insider_error = str(error)
-    try:
-        holder_frame = _read_frame(ticker, "institutional_holders")
-    except Exception as error:
+    holder_frame, error = call_yahoo(lambda: _read_frame(ticker, "institutional_holders"))
+    if error is not None:
         holder_frame = None
         holder_error = str(error)
     insiders = _rows_from_frame(insider_frame, _INSIDER_FIELDS, limit=6)

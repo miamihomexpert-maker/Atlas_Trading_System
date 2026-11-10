@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import logging
+import threading
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -8,6 +10,187 @@ from atlas.logger import get_logger
 
 
 logger = get_logger()
+
+# One Yahoo call at a time, and a short wait. A hung download must not pin the page.
+HISTORY_TIMEOUT_SECONDS = 4
+_PAUSE_BASE_SECONDS = 60
+_PAUSE_MAX_SECONDS = 300
+_RATE_LIMIT_MARKERS = (
+    "too many requests",
+    "rate limited",
+    "rate limit",
+    "yfratelimiterror",
+)
+_fetch_lock = threading.Lock()
+_pause_lock = threading.Lock()
+_skip_local = threading.local()
+_paused_until = None
+_pause_note = None
+_pause_steps = 0
+
+
+class _YahooRateLimitLog(logging.Handler):
+    """yfinance often logs the rate limit and returns nothing instead of raising."""
+
+    def emit(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return
+        if _is_rate_limit_text(message):
+            _pause(message)
+
+
+def _install_yahoo_rate_limit_log():
+    yf_log = logging.getLogger("yfinance")
+    if any(isinstance(handler, _YahooRateLimitLog) for handler in yf_log.handlers):
+        return
+    yf_log.addHandler(_YahooRateLimitLog(level=logging.INFO))
+
+
+def _is_rate_limit_text(value):
+    text = str(value or "").lower()
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
+
+def _mark_skip(reason):
+    reasons = getattr(_skip_local, "reasons", None)
+    if reasons is None:
+        reasons = []
+        _skip_local.reasons = reasons
+    if reason:
+        reasons.append(reason)
+
+
+def take_skips():
+    """Return and clear skip reasons recorded on this thread."""
+    reasons = list(getattr(_skip_local, "reasons", None) or [])
+    _skip_local.reasons = []
+    return reasons
+
+
+def _pause(reason, now=None):
+    """Hold further Yahoo calls. The note is what the dashboard can show."""
+    global _paused_until, _pause_note, _pause_steps
+    now = now or datetime.now(timezone.utc)
+    timed_out = "timed out" in str(reason or "").lower()
+    with _pause_lock:
+        if _paused_until is not None and now < _paused_until:
+            return
+        _pause_steps += 1
+        seconds = min(
+            _PAUSE_MAX_SECONDS,
+            _PAUSE_BASE_SECONDS * (2 ** min(_pause_steps - 1, 4)),
+        )
+        _paused_until = now + timedelta(seconds=seconds)
+        if timed_out:
+            _pause_note = "Yahoo history timed out. Requests are paused."
+        else:
+            _pause_note = "Yahoo rate limited. History requests are paused."
+        until = _paused_until
+    logger.info(
+        "Market-data feed paused for %ss until %s: %s",
+        seconds,
+        until.isoformat(),
+        reason,
+    )
+
+
+def note_feed_failure(error):
+    """Pause when the message is a Yahoo rate limit. Other errors stay local."""
+    if not _is_rate_limit_text(f"{type(error).__name__} {error}"):
+        return False
+    _pause(error)
+    return True
+
+
+def note_feed_success():
+    global _pause_steps
+    if feed_is_paused():
+        return
+    with _pause_lock:
+        _pause_steps = 0
+
+
+def clear_feed_pause():
+    """Drop the pause. Tests use this so one case does not silence the next."""
+    global _paused_until, _pause_note, _pause_steps
+    with _pause_lock:
+        _paused_until = None
+        _pause_note = None
+        _pause_steps = 0
+    take_skips()
+
+
+def feed_status(now=None):
+    """None when calls may proceed. Otherwise a short pause description."""
+    now = now or datetime.now(timezone.utc)
+    with _pause_lock:
+        if _paused_until is None or now >= _paused_until:
+            return None
+        remaining = max(0, int((_paused_until - now).total_seconds()))
+        return {
+            "paused": True,
+            "until": _paused_until.isoformat(),
+            "seconds_remaining": remaining,
+            "note": _pause_note,
+        }
+
+
+def feed_is_paused(now=None):
+    return feed_status(now) is not None
+
+
+def pause_note(now=None):
+    status = feed_status(now)
+    return None if status is None else status["note"]
+
+
+def call_yahoo(action, timeout=None):
+    """Run one Yahoo call off the request if it is already known to be blocked.
+
+    Returns ``(value, error)``. A pause, a busy feed, a timeout, or a rate
+    limit yields no value. The action's own data is returned unchanged.
+    """
+    if feed_is_paused():
+        _mark_skip("paused")
+        return None, RuntimeError(pause_note() or "Yahoo requests are paused.")
+    if not _fetch_lock.acquire(blocking=False):
+        _mark_skip("busy")
+        return None, RuntimeError("A market-data request is already running.")
+    try:
+        if feed_is_paused():
+            _mark_skip("paused")
+            return None, RuntimeError(pause_note() or "Yahoo requests are paused.")
+        box = {}
+
+        def run():
+            try:
+                box["value"] = action()
+            except Exception as error:
+                box["error"] = error
+
+        worker = threading.Thread(target=run, name="atlas-yahoo", daemon=True)
+        worker.start()
+        worker.join(timeout if timeout is not None else HISTORY_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            _pause("Yahoo history timed out.")
+            _mark_skip("timeout")
+            return None, TimeoutError("Yahoo history timed out.")
+        if "error" in box:
+            error = box["error"]
+            if note_feed_failure(error):
+                _mark_skip("rate_limit")
+            else:
+                _mark_skip("error")
+            return None, error
+        note_feed_success()
+        return box.get("value"), None
+    finally:
+        _fetch_lock.release()
+
+
+_install_yahoo_rate_limit_log()
 
 
 OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
@@ -202,18 +385,31 @@ def _fetch_history(symbol, period, interval):
     normalized_symbol = str(symbol).strip().upper()
     if not normalized_symbol:
         raise ValueError("Instrument symbol is required.")
-    try:
-        history = yf.Ticker(normalized_symbol).history(period=period, interval=interval)
-    except Exception as error:
-        logger.info("%s history fetch skipped: %s", normalized_symbol, error)
+    history, error = call_yahoo(
+        lambda: yf.Ticker(normalized_symbol).history(period=period, interval=interval)
+    )
+    if error is not None:
+        if not feed_is_paused():
+            logger.info("%s history fetch skipped: %s", normalized_symbol, error)
         return None
     if history is None or getattr(history, "empty", True):
+        if feed_is_paused():
+            _mark_skip("rate_limit")
+            logger.info(
+                "%s history fetch skipped: %s",
+                normalized_symbol,
+                pause_note() or "Yahoo returned no bars while rate limited.",
+            )
+        else:
+            _mark_skip("empty")
         return None
     try:
-        return normalize_ohlcv(history)
+        normalized = normalize_ohlcv(history)
     except (TypeError, ValueError) as error:
         logger.info("%s history dropped: %s", normalized_symbol, error)
+        _mark_skip("error")
         return None
+    return normalized
 
 
 def get_stock_price(symbol):

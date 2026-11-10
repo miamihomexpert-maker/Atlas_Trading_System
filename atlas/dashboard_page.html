@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="23">
+<meta name="atlas-dashboard-version" content="24">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -650,6 +650,9 @@ async function loadCandles(options) {
       ? `SMA ${indicators.sma} and EMA ${indicators.ema} are calculated from these bars. RSI ${indicators.rsi} is the lower panel.`
       : "Indicator periods were not returned.";
     const parts = [];
+    if (payload.feed_paused && Number(payload.retry_after_seconds) > 0) {
+      state.feedPausedUntil = Date.now() + Number(payload.retry_after_seconds) * 1000;
+    }
     if (payload.error) parts.push(payload.error);
     if (payload.symbol || payload.timeframe) parts.push(`${payload.symbol || ""} ${payload.timeframe || ""}`.trim());
     if (candles.length) parts.push(`${candles.length} bars from the market-data feed.`);
@@ -1309,11 +1312,34 @@ async function refresh(forceScan) {
   renderClock();
   renderWatchlist();
   renderDetail();
-  renderIdeas(payload.candidate_explanation || "");
+  const noteParts = [];
+  if (payload.market_note) noteParts.push(payload.market_note);
+  if (payload.candidate_explanation) noteParts.push(payload.candidate_explanation);
+  renderIdeas(noteParts.join(" "));
   renderActions();
   renderAlerts(payload.alerts || []);
   renderReview(payload.review);
-  await loadCandles();
+  if (payload.feed_paused && Number(payload.feed_retry_after_seconds) > 0) {
+    state.feedPausedUntil = Date.now() + Number(payload.feed_retry_after_seconds) * 1000;
+  } else if (!payload.feed_paused) {
+    state.feedPausedUntil = 0;
+  }
+  loadCandles().catch((error) => {
+    document.getElementById("chart-note").textContent = error.message;
+  });
+  if (payload.scan_pending) scheduleScanFollowUp();
+  else if (state.scanFollowUp) {
+    clearTimeout(state.scanFollowUp);
+    state.scanFollowUp = 0;
+  }
+}
+
+function scheduleScanFollowUp() {
+  if (state.scanFollowUp) return;
+  state.scanFollowUp = setTimeout(() => {
+    state.scanFollowUp = 0;
+    refresh(false).catch(() => {});
+  }, 2000);
 }
 
 const LAYOUT_KEY = "atlas-paper-layout";
@@ -1538,6 +1564,7 @@ refresh(false).catch((error) => { document.getElementById("watchlist").textConte
 setInterval(() => { refresh(false).catch(() => {}); }, 20000);
 setInterval(() => {
   if (!sessionStillOpen()) return;
+  if (state.feedPausedUntil && Date.now() < state.feedPausedUntil) return;
   loadCandles({ live: true }).catch(() => {});
 }, CHART_REFRESH_MS);
 setInterval(renderClock, 1000);
