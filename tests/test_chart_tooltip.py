@@ -49,7 +49,9 @@ def test_tooltip_omits_a_missing_volume_instead_of_zero():
 def test_page_has_the_floating_tooltip_and_cache_version():
     page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
     assert 'id="chart-tooltip"' in page
-    assert 'name="atlas-dashboard-version" content="17"' in page
+    assert 'name="atlas-dashboard-version" content="18"' in page
+    assert "#action-buy, #action-sell" in page
+    assert "padding: 14px 28px" in page
     assert "function tooltipRows" in page
     assert "hideTooltip" in page
     assert "bar.volume || 0" not in page
