@@ -147,6 +147,8 @@ class AtlasDatabase:
             }
             if "effect" not in order_columns:
                 self._connection.execute("ALTER TABLE paper_orders ADD COLUMN effect TEXT")
+            if "reason" not in order_columns:
+                self._connection.execute("ALTER TABLE paper_orders ADD COLUMN reason TEXT")
             plan_columns = {
                 row["name"]
                 for row in self._connection.execute("PRAGMA table_info(position_plans)").fetchall()
@@ -200,15 +202,19 @@ class AtlasDatabase:
         position_plan=None,
         clear_position_symbol=None,
         timestamp=None,
+        reason=None,
     ):
         stamp = timestamp or datetime.now(timezone.utc).isoformat()
+        stored_reason = reason if reason is not None else order.get("reason")
+        if stored_reason is not None:
+            stored_reason = str(stored_reason).strip() or None
         with self._lock, self._connection:
             self._connection.execute(
                 """
                 INSERT INTO paper_orders(
                     order_id, timestamp, symbol, side, quantity, price,
-                    realized_pnl, equity, effect
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    realized_pnl, equity, effect, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order["order_id"],
@@ -220,6 +226,7 @@ class AtlasDatabase:
                     float(realized_pnl),
                     float(account["equity"]),
                     order.get("effect"),
+                    stored_reason,
                 ),
             )
             self._connection.execute(

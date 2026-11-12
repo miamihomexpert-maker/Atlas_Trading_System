@@ -8,7 +8,8 @@ from atlas.config import LIVE_TRADING
 from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
-from atlas.market_hours import regular_session_status
+from atlas.flatten import flatten_open_paper_positions
+from atlas.market_hours import as_new_york, regular_session_status, seconds_until_regular_close
 from atlas.pipeline import _remote_approval_required, run_paper_pipeline
 from config.settings import load_settings
 
@@ -319,6 +320,14 @@ def resolve_loop_interval(interval_seconds=None):
     return interval_seconds
 
 
+def _loop_pause_seconds(current, interval_seconds):
+    """Sleep until the close when 16:00 arrives before the normal interval."""
+    remaining = seconds_until_regular_close(current)
+    if remaining is not None and remaining < interval_seconds:
+        return remaining
+    return interval_seconds
+
+
 def run_paper_loop(
     interval_seconds=None,
     max_cycles=None,
@@ -329,7 +338,11 @@ def run_paper_loop(
     """Repeat a paper session on US regular-session hours.
 
     Outside 09:30-16:00 America/New_York on weekdays the loop sleeps and does
-    not fetch or submit. KeyboardInterrupt stops the loop. Live trading is refused.
+    not fetch or submit. If this process saw the session open, the first
+    pass at or after 16:00 flattens still-open paper positions before the
+    loop sleeps out the rest of the day. That close does not open a trade.
+    A process that was not running through the close does not flatten.
+    KeyboardInterrupt stops the loop. Live trading is refused.
     ``sleep`` and ``now`` are injection points for tests.
     """
     if LIVE_TRADING:
@@ -347,28 +360,58 @@ def run_paper_loop(
     pause = sleep or time.sleep
     cycles = []
     stopped = None
+    seen_open_dates = set()
+    flattened_dates = set()
     try:
         while True:
             current = clock()
             is_open, reason = regular_session_status(current)
-            if not is_open:
+            session_date = as_new_york(current).date()
+            if is_open:
+                seen_open_dates.add(session_date)
+                summary = run_paper_session(**session_kwargs)
+                cycle = {
+                    "market": reason,
+                    "ran": True,
+                    "fill_count": summary["fill_count"],
+                    "summary": summary,
+                }
+                current = clock()
+                is_open, reason = regular_session_status(current)
+                session_date = as_new_york(current).date()
+            else:
                 logger.info(
                     "US regular session is %s; sleeping %s seconds",
                     reason,
                     interval_seconds,
                 )
-                cycles.append({"market": reason, "ran": False})
-            else:
-                summary = run_paper_session(**session_kwargs)
-                cycles.append({
-                    "market": reason,
-                    "ran": True,
-                    "fill_count": summary["fill_count"],
-                    "summary": summary,
-                })
+                cycle = {"market": reason, "ran": False}
+            if (
+                not is_open
+                and reason == "after_close"
+                and session_date in seen_open_dates
+                and session_date not in flattened_dates
+            ):
+                flatten_kwargs = {
+                    key: session_kwargs[key]
+                    for key in (
+                        "settings",
+                        "broker",
+                        "database",
+                        "histories_by_symbol",
+                        "timeframes",
+                    )
+                    if key in session_kwargs
+                }
+                cycle["flatten"] = flatten_open_paper_positions(
+                    now=current,
+                    **flatten_kwargs,
+                )
+                flattened_dates.add(session_date)
+            cycles.append(cycle)
             if max_cycles is not None and len(cycles) >= max_cycles:
                 break
-            pause(interval_seconds)
+            pause(_loop_pause_seconds(clock(), interval_seconds))
     except KeyboardInterrupt:
         logger.info("Paper loop stopped")
         stopped = "interrupt"
@@ -450,9 +493,11 @@ def _book_report(broker, database, now=None):
     if not fills:
         lines.append("  (none)")
     for fill in fills:
+        reason = fill.get("reason")
+        extra = f" {reason}" if reason else ""
         lines.append(
             f"  {fill['timestamp']} {fill['symbol']} {fill['side']} "
-            f"{fill['quantity']} @ {float(fill['price']):.2f}"
+            f"{fill['quantity']} @ {float(fill['price']):.2f}{extra}"
         )
     text = "\n".join(lines)
     return {

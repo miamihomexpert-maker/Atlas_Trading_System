@@ -441,6 +441,110 @@ class PaperBroker:
         self._history.append(filled)
         return dict(filled)
 
+    def close_open_position(
+        self,
+        symbol,
+        price,
+        client_order_id,
+        reason,
+        approved=False,
+        timestamp=None,
+    ):
+        """Close one open paper position at a caller-supplied price.
+
+        This only reduces a position that is already open. It does not open a
+        long or a short, and it does not change the risk limits on
+        ``submit_order``. The price has to be a positive finite number from
+        the caller. A missing price is not replaced here.
+        """
+        if not approved:
+            raise PermissionError("Order requires explicit human approval.")
+        symbol = str(symbol).strip().upper()
+        order_id = str(client_order_id).strip()
+        stored_reason = str(reason or "").strip()
+        if not order_id:
+            raise ValueError("A client order ID is required for duplicate prevention.")
+        if not stored_reason:
+            raise ValueError("A close reason is required.")
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or not isfinite(price)
+            or price <= 0
+        ):
+            raise ValueError("Order price must be a positive finite number.")
+        if order_id in self._orders:
+            existing = self._orders[order_id]
+            if (
+                existing["symbol"] != symbol
+                or existing["price"] != float(price)
+                or existing.get("reason") != stored_reason
+            ):
+                raise ValueError("Client order ID was already used for a different order.")
+            return dict(existing)
+
+        position = self._positions.get(symbol)
+        if position is None:
+            raise ValueError("No open paper position to close.")
+        held = position.get("side", "LONG")
+        if held == "SHORT":
+            side, effect = "BUY", "CLOSE_SHORT"
+        elif held == "LONG":
+            side, effect = "SELL", "CLOSE_LONG"
+        else:
+            raise ValueError("Paper position side is not recognized.")
+        quantity = position["quantity"]
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("Order quantity must be a positive whole number.")
+
+        order = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": float(price),
+            "client_order_id": order_id,
+            "effect": effect,
+            "reason": stored_reason,
+        }
+        previous_state = (
+            self._cash,
+            deepcopy(self._positions),
+            self._realized_pnl,
+        )
+        realized_delta = self._apply_position_change(order)
+        position_plan, clear_symbol = self._position_plan_after_fill(
+            order,
+            None,
+            None,
+        )
+        filled = {
+            **order,
+            "status": "FILLED",
+            "order_id": order_id,
+            "realized_pnl": realized_delta,
+        }
+        if self._database is not None:
+            plan_kwargs = {}
+            if position_plan is not None:
+                plan_kwargs["position_plan"] = position_plan
+            if clear_symbol is not None:
+                plan_kwargs["clear_position_symbol"] = clear_symbol
+            try:
+                self._database.record_paper_fill(
+                    filled,
+                    realized_delta,
+                    self.account_info(),
+                    timestamp=timestamp,
+                    reason=stored_reason,
+                    **plan_kwargs,
+                )
+            except Exception:
+                self._cash, self._positions, self._realized_pnl = previous_state
+                raise
+        self._orders[order_id] = filled
+        self._history.append(filled)
+        return dict(filled)
+
 
 def get_broker_status():
     return "PAPER BROKER MODULE ONLINE; LIVE TRADING DISABLED"
