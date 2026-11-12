@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="26">
+<meta name="atlas-dashboard-version" content="27">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -103,8 +103,23 @@
     padding: 10px 12px;
     border-bottom: 1px solid var(--line);
   }
-  .reader-bar strong { letter-spacing: 0.08em; }
-  .reader-bar button { margin-left: auto; }
+  .reader-bar strong { letter-spacing: 0.08em; flex: 1 1 auto; min-width: 0; }
+  .reader-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+  #reader-speak {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 11px 16px;
+    font-size: 18px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #reader-speak[hidden] { display: none; }
+  #reader-speak svg { width: 22px; height: 22px; display: block; }
+  #reader-speak .icon-stop { display: none; }
+  #reader-speak.speaking .icon-speak { display: none; }
+  #reader-speak.speaking .icon-stop { display: block; }
   .reader-body { overflow: auto; padding: 10px 12px 16px; min-height: 0; }
   .reader-panel { display: none; }
   .reader-panel.active { display: block; }
@@ -286,7 +301,17 @@
   <section class="panel" id="pane-reader" hidden>
     <div class="reader-bar">
       <strong id="reader-title">Signals</strong>
-      <button id="reader-close" type="button">Close</button>
+      <div class="reader-actions">
+        <button id="reader-speak" type="button" hidden aria-pressed="false" aria-label="Read this summary aloud" title="Read this summary aloud">
+          <svg class="icon-speak" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+          </svg>
+          <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="reader-close" type="button">Close</button>
+      </div>
     </div>
     <div class="reader-body">
       <div class="reader-panel" id="trades" data-panel="trades"><h2>TODAY'S TRADES</h2><p class="muted">No paper positions or same-day trades.</p></div>
@@ -715,7 +740,7 @@ function renderSwitchers(portfolio) {
     return `<button class="symbol-btn ${decisionClass(scan && scan.decision)} ${symbol === state.symbol ? "active" : ""}" type="button" data-symbol="${symbol}">${symbol}</button>`;
   }).join("");
   document.querySelectorAll("[data-symbol]").forEach((button) => {
-    button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); };
+    button.onclick = () => { focusSymbol(button.dataset.symbol); refreshDetail(); loadCandles(); paintSwitchers(); };
   });
   const frames = state.chartTimeframes.length ? state.chartTimeframes : (portfolio.timeframes || []);
   if (!state.timeframe || frames.indexOf(state.timeframe) < 0) {
@@ -787,12 +812,17 @@ function renderWatchlist() {
       <div class="muted">Last scan price ${money(scan.price)}</div>
     </div>`).join("");
   host.querySelectorAll("[data-symbol]").forEach((button) => {
-    button.onclick = () => { state.symbol = button.dataset.symbol; refreshDetail(); loadCandles(); paintSwitchers(); renderWatchlist(); };
+    button.onclick = () => { focusSymbol(button.dataset.symbol); refreshDetail(); loadCandles(); paintSwitchers(); renderWatchlist(); };
   });
 }
 
-function selectSymbol(symbol) {
+function focusSymbol(symbol) {
+  if (symbol !== state.symbol) stopSpeaking();
   state.symbol = symbol;
+}
+
+function selectSymbol(symbol) {
+  focusSymbol(symbol);
   renderWatchlist();
   renderIdeas(state.explanation || "");
   renderActions();
@@ -856,12 +886,12 @@ function renderPredictions(scan) {
   const gate = prediction.gate || {};
   const parts = [`<h2 class="${decisionClass(scan.decision)}">PREDICTIONS · ${scan.symbol}</h2>`];
   parts.push(`<p>${escapeHtml(prediction.disclaimer || "This is not a forecast of profit.")}</p>`);
-  parts.push(`<p class="lead">${escapeHtml(prediction.lead || "There is not enough public data to state a likelihood.")}</p>`);
+  parts.push(`<p class="lead speak">${escapeHtml(prediction.lead || "There is not enough public data to state a likelihood.")}</p>`);
   const flow = prediction.flow || {};
   const activity = flow.activity || {};
   const volume = flow.volume || {};
   parts.push(`<h3>Why shares are being bought or sold</h3>`);
-  parts.push(`<p class="lead">${escapeHtml(flow.why || "No public reason was returned.")}</p>`);
+  parts.push(`<p class="lead speak">${escapeHtml(flow.why || "No public reason was returned.")}</p>`);
   if (activity.note) parts.push(`<p>${escapeHtml(activity.note)}</p>`);
   if (volume.note) parts.push(`<p>${escapeHtml(volume.note)}</p>`);
   (flow.findings || []).forEach((item) => {
@@ -990,12 +1020,14 @@ function renderRisk(portfolio) {
   const host = document.getElementById("risk");
   const risk = portfolio && portfolio.risk;
   if (!risk) {
-    host.innerHTML = `<p class="muted">Risk usage was not returned.</p>`;
+    state.riskSpeak = "Risk usage was not returned.";
+    host.innerHTML = `<p class="muted speak">${state.riskSpeak}</p>`;
     return;
   }
+  state.riskSpeak = "These are the paper account's limits. A buy is checked again before it is sent.";
   host.innerHTML = `
     <h2>RISK LIMITS</h2>
-    <p>These are the paper account's limits. A buy is checked again before it is sent.</p>
+    <p class="speak">${state.riskSpeak}</p>
     <div>Per trade: at most ${percent(risk.per_trade)} of equity.</div>
     <div>Cash ${money(risk.cash)}. Equity ${money(risk.equity)}.</div>
     <div>Open positions use ${money(risk.exposure)} (${percent(risk.exposure_fraction)} of equity). The cap is ${percent(risk.max_exposure)}, which is ${money(risk.exposure_cap)} at this equity.</div>
@@ -1257,10 +1289,12 @@ function renderReview(review) {
   const scan = selectedScan();
   const heading = `<h2 class="${decisionClass(scan && scan.decision)}">REVIEW${scan ? " · " + scan.symbol : ""}</h2>`;
   if (!review) {
-    host.innerHTML = `${heading}<p>No paper fills to review yet.</p>`;
+    state.reviewSpeak = "No paper fills to review yet.";
+    host.innerHTML = `${heading}<p class="speak">No paper fills to review yet.</p>`;
     return;
   }
-  let body = `${heading}<p>${text(review.scoreboard_note)}</p>`;
+  state.reviewSpeak = String(review.scoreboard_note || "No paper fills to review yet.");
+  let body = `${heading}<p class="speak">${text(state.reviewSpeak)}</p>`;
   const board = review.scoreboard;
   if (board && board.reviewed_count) {
     const rate = finite(board.hit_rate) ? `${(board.hit_rate * 100).toFixed(1)}%` : "—";
@@ -1539,6 +1573,7 @@ function saveTab() {
 }
 
 function applyTab(saved) {
+  stopSpeaking();
   const next = clampTab(saved);
   state.tab = next;
   const reader = document.getElementById("pane-reader");
@@ -1554,6 +1589,7 @@ function applyTab(saved) {
     panel.classList.toggle("active", panel.dataset.panel === next.tab);
   });
   paintReaderTitle();
+  syncSpeakButton();
   drawnBox = "";
   scheduleChartRedraw();
 }
@@ -1567,8 +1603,120 @@ function chooseTab(name) {
   saveTab();
 }
 
+const SPEAK_TABS = ["predictions", "investors", "signals", "company", "behavior", "risk", "review"];
+let speakGeneration = 0;
+
+function speechReady() {
+  return typeof window.speechSynthesis !== "undefined"
+    && window.speechSynthesis !== null
+    && typeof window.SpeechSynthesisUtterance === "function";
+}
+
+// Predictions speech is the bold headline and the why summary. Source rows stay on the page.
+function predictionSpeakText(scan) {
+  if (!scan) {
+    return "Select a symbol. This is the main read of public stockholder behavior. It is not a forecast of profit.";
+  }
+  const prediction = scan.prediction || {};
+  const flow = prediction.flow || {};
+  const lead = String(prediction.lead || "There is not enough public data to state a likelihood.").trim();
+  const why = String(flow.why || "No public reason was returned.").trim();
+  return [lead, why].filter(Boolean).join(" ");
+}
+
+function investorSpeakText(scan) {
+  if (!scan) {
+    return "Select a symbol. Only investors the public feed returned are listed. None is filled in.";
+  }
+  const board = (scan.prediction && scan.prediction.investors) || {};
+  return String(board.note || "No major investor with a name and a date was returned. None is filled in.").trim();
+}
+
+function signalsSpeakText(scan) {
+  if (!scan) return "Waiting for the scan.";
+  const copy = scan.copy || {};
+  const headline = String(copy.decision || "").trim();
+  const summary = String(copy.why || scan.reason || "").trim();
+  return [headline, summary].filter(Boolean).join(" ");
+}
+
+function companySpeakText(scan) {
+  if (!scan) {
+    return "Select a symbol to see where its money goes. Only figures the feed returned are shown.";
+  }
+  const copy = scan.company_copy || {};
+  return String(copy.summary || "").trim();
+}
+
+function behaviorSpeakText(scan) {
+  if (!scan) {
+    return "Select a symbol to see public filings and later-bar notes. This is not a forecast of profit.";
+  }
+  const behavior = scan.behavior || {};
+  const headline = String(behavior.disclaimer || "").trim();
+  const summary = String(behavior.note || "").trim();
+  return [headline, summary].filter(Boolean).join(" ");
+}
+
+function readerSpeakText() {
+  const tab = (state.tab && state.tab.tab) || "";
+  const scan = selectedScan();
+  if (tab === "predictions") return predictionSpeakText(scan);
+  if (tab === "investors") return investorSpeakText(scan);
+  if (tab === "signals") return signalsSpeakText(scan);
+  if (tab === "company") return companySpeakText(scan);
+  if (tab === "behavior") return behaviorSpeakText(scan);
+  if (tab === "risk") return state.riskSpeak || "Waiting for the paper account.";
+  if (tab === "review") return state.reviewSpeak || "No paper fills to review yet.";
+  return "";
+}
+
+function setSpeaking(on) {
+  const button = document.getElementById("reader-speak");
+  if (!button) return;
+  button.classList.toggle("speaking", !!on);
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+  button.setAttribute("aria-label", on ? "Stop reading" : "Read this summary aloud");
+  button.title = on ? "Stop reading" : "Read this summary aloud";
+}
+
+function stopSpeaking() {
+  speakGeneration += 1;
+  if (speechReady()) {
+    try { window.speechSynthesis.cancel(); }
+    catch (error) { /* This browser refused to stop speech. */ }
+  }
+  setSpeaking(false);
+}
+
+function syncSpeakButton() {
+  const button = document.getElementById("reader-speak");
+  if (!button) return;
+  const tab = (state.tab && state.tab.tab) || "";
+  const open = !!(state.tab && state.tab.open);
+  button.hidden = !(speechReady() && open && SPEAK_TABS.indexOf(tab) >= 0);
+}
+
+function startSpeaking() {
+  if (!speechReady()) return;
+  const spoken = readerSpeakText();
+  if (!spoken) return;
+  const utterance = new SpeechSynthesisUtterance(spoken);
+  const token = ++speakGeneration;
+  utterance.onend = function () { if (token === speakGeneration) setSpeaking(false); };
+  utterance.onerror = function () { if (token === speakGeneration) setSpeaking(false); };
+  setSpeaking(true);
+  try { window.speechSynthesis.speak(utterance); }
+  catch (error) { if (token === speakGeneration) setSpeaking(false); }
+}
+
 document.querySelectorAll("[data-tab]").forEach((button) => {
   button.addEventListener("click", () => chooseTab(button.dataset.tab));
+});
+document.getElementById("reader-speak").addEventListener("click", () => {
+  const button = document.getElementById("reader-speak");
+  if (button.classList.contains("speaking")) stopSpeaking();
+  else startSpeaking();
 });
 document.getElementById("reader-close").addEventListener("click", () => {
   applyTab({ open: false, tab: (state.tab && state.tab.tab) || "signals" });
