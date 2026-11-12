@@ -16,6 +16,7 @@ from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
 from atlas.market_data import (
+    bar_as_of,
     chart_fetch_scope,
     feed_is_paused,
     feed_status,
@@ -593,8 +594,8 @@ class PaperDashboard:
                 f"{symbol} has no entry, stop, and target from the scan, "
                 "so the paper order was not sent."
             )
-        stamp = card.get("market_timestamp")
-        if not isinstance(stamp, str) or not stamp.strip():
+        stamp = self._market_timestamp_for_card(card)
+        if not stamp:
             raise PermissionError(
                 f"{symbol} has no source-market timestamp, so the paper order was not sent."
             )
@@ -604,9 +605,55 @@ class PaperDashboard:
             "entry_price": float(entry),
             "stop_loss": float(stop),
             "profit_target": float(target),
-            "market_timestamp": stamp.strip(),
+            "market_timestamp": stamp,
             "explanation": str(card.get("reason") or ""),
         }
+
+    def _market_timestamp_for_card(self, card):
+        """When this scan's price was current. Missing stamps are not invented.
+
+        Cards saved before the timestamp was stored still have the bar open
+        and the time the scan recorded it. That pair is the same clock the
+        fresh-data check already uses.
+        """
+        stamp = None if card is None else card.get("market_timestamp")
+        if isinstance(stamp, str) and stamp.strip():
+            return stamp.strip()
+        if card is None:
+            return None
+        symbol = str(card.get("symbol") or "").strip().upper()
+        if not symbol:
+            return None
+        try:
+            observed = self.database.latest_scan_observation(symbol)
+        except sqlite3.OperationalError:
+            raise
+        except Exception as error:
+            logger.info("%s scan observation skipped: %s", symbol, error)
+            return None
+        if not observed:
+            return None
+        bar_time = observed.get("bar_time")
+        recorded = card.get("scanned_at") or observed.get("recorded_at")
+        if not isinstance(bar_time, str) or not bar_time.strip():
+            return None
+        if not isinstance(recorded, str) or not recorded.strip():
+            return None
+        try:
+            opened = datetime.fromisoformat(bar_time.strip().replace("Z", "+00:00"))
+            seen = datetime.fromisoformat(recorded.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        timeframe = str(observed.get("timeframe") or "1h").strip() or "1h"
+        try:
+            as_of = bar_as_of(opened, timeframe, seen)
+        except (TypeError, ValueError):
+            return None
+        return as_of.isoformat()
 
     def _quote_for_exit(self, symbol):
         """A real price already in hand. A scan does not have to finish first."""
@@ -619,7 +666,7 @@ class PaperDashboard:
             return None
         card = self._stored_card(symbol)
         price = None if card is None else card.get("price")
-        stamp = None if card is None else card.get("market_timestamp")
+        stamp = self._market_timestamp_for_card(card)
         if (
             isinstance(price, (int, float))
             and not isinstance(price, bool)
@@ -2124,8 +2171,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self._reject_remote():
+            self._log_order("?", "?", error="Dashboard is localhost only.")
             return
         if self.headers.get("X-Atlas-Token") != self.service.token:
+            self._log_order("?", "?", error="Local approval token required.")
             self._send(403, {"ok": False, "error": "Local approval token required."})
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -2133,9 +2182,12 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         try:
             body = json.loads(raw.decode("utf-8") or "{}")
         except json.JSONDecodeError:
+            self._log_order("?", "?", error="JSON body required.")
             self._send(400, {"ok": False, "error": "JSON body required."})
             return
         path = self.path.split("?", 1)[0]
+        symbol = str(body.get("symbol") or "").strip().upper()
+        side = {"/api/buy": "BUY", "/api/sell": "SELL", "/api/alerts/accept": "SELL"}.get(path)
         try:
             if path == "/api/buy":
                 result = self.service.buy(
@@ -2152,28 +2204,43 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/alerts/accept":
                 result = self.service.accept_alert(self.service.token, body.get("alert_id"))
             else:
+                self._log_order(symbol or "?", side or "?", error="Not found.")
                 self._send(404, {"ok": False, "error": "Not found."})
                 return
+            order = (result or {}).get("order") or {}
+            self._log_order(
+                order.get("symbol") or symbol or "?",
+                order.get("side") or side or "?",
+                quantity=order.get("quantity"),
+            )
             self._send(200, result)
         except PermissionError as error:
+            self._log_order(symbol or "?", side or "?", error=error)
             self._send(403, {"ok": False, "error": str(error)})
         except ValueError as error:
+            self._log_order(symbol or "?", side or "?", error=error)
             self._send(400, {"ok": False, "error": str(error)})
         except sqlite3.OperationalError as error:
-            logger.info("Dashboard order failed: %s", error)
             if "locked" in str(error).lower():
-                self._send(503, {
-                    "ok": False,
-                    "error": (
-                        "The paper ledger is in use by the loop. "
-                        "The order was not filled."
-                    ),
-                })
-                return
-            self._send(400, {"ok": False, "error": str(error)})
+                message = (
+                    "The paper ledger is in use by the loop. "
+                    "The order was not filled."
+                )
+            else:
+                message = str(error)
+            self._log_order(symbol or "?", side or "?", error=message)
+            status = 503 if "locked" in str(error).lower() else 400
+            self._send(status, {"ok": False, "error": message})
         except Exception as error:
-            logger.info("Dashboard order failed: %s", error)
+            self._log_order(symbol or "?", side or "?", error=error)
             self._send(400, {"ok": False, "error": str(error)})
+
+    def _log_order(self, symbol, side, quantity=None, error=None):
+        """One terminal line for every paper click, fill or rejection."""
+        if error is None:
+            logger.info("paper order %s %s %s: filled", symbol, side, quantity)
+            return
+        logger.info("paper order %s %s: rejected: %s", symbol, side, error)
 
 
 def make_server(service, port=0):

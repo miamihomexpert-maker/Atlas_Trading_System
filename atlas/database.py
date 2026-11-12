@@ -38,6 +38,10 @@ class AtlasDatabase:
             timeout=BUSY_TIMEOUT_SECONDS,
         )
         self._connection.row_factory = sqlite3.Row
+        # Do not let sqlite3 open a second, hidden transaction around BEGIN.
+        # On some Python versions connection.commit() then does nothing and the
+        # next write rolls the fill back, so the page still shows an empty book.
+        self._connection.isolation_level = None
         self._connection.execute(
             f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_SECONDS * 1000)}"
         )
@@ -201,12 +205,23 @@ class AtlasDatabase:
             try:
                 yield
             except BaseException:
-                self._connection.rollback()
+                self._end_sql_transaction(commit=False)
                 raise
             else:
-                self._connection.commit()
+                self._end_sql_transaction(commit=True)
         finally:
             self._lock.release()
+
+    def _end_sql_transaction(self, commit):
+        """COMMIT or ROLLBACK in SQL. connection.commit() can be a no-op."""
+        statement = "COMMIT" if commit else "ROLLBACK"
+        try:
+            self._connection.execute(statement)
+        except sqlite3.OperationalError as error:
+            message = str(error).lower()
+            if "no transaction" in message or "not a transaction" in message:
+                return
+            raise
 
     def close(self):
         with self._lock:

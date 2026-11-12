@@ -6,6 +6,7 @@ file. Neither one may swallow the order. A real risk rejection stays visible.
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import subprocess
 import sys
 import threading
@@ -329,15 +330,134 @@ def test_order_fills_while_the_loop_process_holds_the_database(tmp_path, monkeyp
 
 def test_page_keeps_a_rejection_beside_the_order_buttons():
     page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
-    assert 'name="atlas-dashboard-version" content="29"' in page
+    assert 'name="atlas-dashboard-version" content="30"' in page
     assert 'id="order-note"' in page
+    assert 'id="action-note"' in page
     ideas = page.split("function renderIdeas", 1)[1].split("function ", 1)[0]
     assert "candidate-note" in ideas
     assert "order-note" not in ideas
+    actions = page.split("function renderActions", 1)[1].split("function renderReview", 1)[0]
+    assert "state.orderNote || buyNote" in actions
+    assert 'id="action-note"' in actions
     ask_buy = page.split("async function askBuy", 1)[1].split("async function askSell", 1)[0]
     ask_sell = page.split("async function askSell", 1)[1].split("async function askAlert", 1)[0]
     for block in (ask_buy, ask_sell):
         assert "setOrderNote(error.message" in block
         assert "candidate-note" not in block
+    assert 'post("/api/buy"' in ask_buy
+    assert 'post("/api/sell"' in ask_sell
     refresh = page.split("async function refresh", 1)[1].split("function scheduleScanFollowUp", 1)[0]
     assert "setOrderNote(state.orderNote, state.orderTone)" in refresh
+    assert 'fetch(forceScan ? "/api/state?scan=1" : "/api/state")' in refresh
+
+
+def test_http_buy_while_a_scan_runs_shows_up_on_the_portfolio_get(tmp_path, monkeypatch, caplog):
+    """The click's POST, then the GET the page uses to redraw the book.
+
+    The stored card is the shape saved before a market timestamp was kept:
+    entry, stop, target, and a scan observation, and no market_timestamp.
+    """
+    import logging
+
+    clear_feed_pause()
+    stamp = _stamp()
+    opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+    card = _card("CF", "BUY", 125.37, 123.60, 128.90, stamp)
+    card.pop("market_timestamp")
+    service, database = _live(tmp_path, ("CF",), [card])
+    database.record_scan_observation(
+        "CF", "BUY", 125.37, opened.isoformat(), "1h", None, None, None,
+    )
+    monkeypatch.setattr("atlas.dashboard.fetch_session_histories", _forbid_fetch)
+    service._scan_active = True
+    caplog.set_level(logging.INFO, logger="atlas")
+    server = make_server(service, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    base = f"http://{host}:{port}"
+    try:
+        page = urlopen(base + "/?v=30").read().decode("utf-8")
+        assert 'content="30"' in page
+        assert "Submit paper order" in page
+        assert service.token in page
+        request = Request(
+            base + "/api/buy",
+            data=b'{"symbol":"CF"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-Atlas-Token": service.token,
+            },
+            method="POST",
+        )
+        body = json.loads(urlopen(request).read().decode("utf-8"))
+        assert body["ok"] is True
+        assert body["order"]["symbol"] == "CF"
+        assert body["order"]["side"] == "BUY"
+        assert body["order"]["quantity"] == 79
+        assert body["order"]["price"] == 125.37
+        state = json.loads(urlopen(base + "/api/state").read().decode("utf-8"))
+        book = state["portfolio"]
+        assert book["cash"] == pytest.approx(100_000 - 79 * 125.37)
+        assert book["cash"] < 100_000
+        assert book["positions"][0]["symbol"] == "CF"
+        assert book["positions"][0]["quantity"] == 79
+        assert book["positions"][0]["side"] == "LONG"
+        assert book["recent_fills"][-1]["symbol"] == "CF"
+        assert book["recent_fills"][-1]["quantity"] == 79
+        assert any(row["symbol"] == "CF" and row["closed"] is False for row in state["day_trades"]["rows"])
+        assert "paper order CF BUY 79: filled" in caplog.text
+        other = AtlasDatabase(database.path)
+        try:
+            assert other.list_paper_orders()[-1]["symbol"] == "CF"
+            assert other.list_paper_orders()[-1]["quantity"] == 79
+        finally:
+            other.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        clear_feed_pause()
+        database.close()
+
+
+def test_http_rejection_is_logged_and_cash_stays_put(tmp_path, monkeypatch, caplog):
+    import logging
+
+    clear_feed_pause()
+    card = _card("WAIT", "WAIT", None, None, None, _stamp())
+    service, database = _live(tmp_path, ("WAIT",), [card])
+    monkeypatch.setattr("atlas.dashboard.fetch_session_histories", _forbid_fetch)
+    service._scan_active = True
+    caplog.set_level(logging.INFO, logger="atlas")
+    server = make_server(service, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        request = Request(
+            f"http://{host}:{port}/api/buy",
+            data=b'{"symbol":"WAIT"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-Atlas-Token": service.token,
+            },
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as http_error:
+            urlopen(request)
+        assert http_error.value.code == 400
+        payload = json.loads(http_error.value.read().decode("utf-8"))
+        assert payload["ok"] is False
+        assert "not a current BUY" in payload["error"]
+        assert "wait" in payload["error"].lower()
+        assert "paper order WAIT BUY: rejected:" in caplog.text
+        assert "not a current BUY" in caplog.text
+        state = json.loads(urlopen(f"http://{host}:{port}/api/state").read().decode("utf-8"))
+        assert state["portfolio"]["cash"] == 100_000
+        assert state["portfolio"]["positions"] == []
+        assert state["portfolio"]["recent_fills"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        clear_feed_pause()
+        database.close()
