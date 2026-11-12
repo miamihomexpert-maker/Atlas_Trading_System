@@ -59,7 +59,7 @@ def _prediction_speak(page, scan):
 
 def test_speak_button_reads_the_prediction_summary_and_skips_source_rows():
     page = PAGE.read_text(encoding="utf-8")
-    assert 'name="atlas-dashboard-version" content="29"' in page
+    assert 'name="atlas-dashboard-version" content="30"' in page
     bar = page[page.index('<div class="reader-bar">'):page.index('<div class="reader-body">')]
     assert 'id="reader-speak"' in bar
     assert bar.index('id="reader-speak"') < bar.index('id="reader-close"')
