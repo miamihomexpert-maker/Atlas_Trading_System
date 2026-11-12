@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="25">
+<meta name="atlas-dashboard-version" content="26">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -71,15 +71,21 @@
   #chart-tooltip td:first-child { color: var(--muted); }
   canvas { width: 100%; height: 0; flex: 1 1 auto; min-height: 220px; background: rgba(0, 0, 0, 0.28); }
   .tab-rail {
-    flex: 0 0 148px;
+    flex: 0 0 228px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     padding: 8px 6px;
     min-height: 0;
     overflow: auto;
   }
-  .tab-rail button { width: 100%; text-align: left; line-height: 1.25; }
+  .tab-rail button {
+    width: 100%;
+    text-align: left;
+    line-height: 1.25;
+    font-size: 18px;
+    padding: 11px 16px;
+  }
   .tab-rail button.active { border-color: #7ad7ff; box-shadow: inset 0 0 10px var(--glow); }
   #pane-reader {
     width: var(--pane-reader, 380px);

@@ -106,7 +106,7 @@ def test_investors_tab_is_present_and_an_empty_feed_adds_no_rows():
     assert 'data-panel="investors"' in page
     assert 'data-tab="predictions"' in page
     assert "None is filled in" in page
-    assert 'content="25"' in page
+    assert 'content="26"' in page
     prediction = build_prediction("XYZ", [])
     assert prediction["investors"]["investors"] == []
     assert prediction["flow"]["players"] == []
