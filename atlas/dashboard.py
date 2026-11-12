@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import sqlite3
 import threading
 from urllib.parse import parse_qs, urlsplit
 import uuid
@@ -542,6 +543,156 @@ class PaperDashboard:
             )
         return fetch_session_histories(normalized, self.timeframes)
 
+    def _histories_for_order(self, symbol):
+        """Bars for a fresh check. A running scan already holds the feed lock.
+
+        Taking that lock is what made Submit look like it did nothing: the
+        download returned no bars, and the order stopped before a fill.
+        """
+        if self.histories_by_symbol is not None:
+            return self._histories(symbol)
+        if self.scan_pending() or feed_is_paused():
+            return None
+        try:
+            return self._histories(symbol) or None
+        except Exception as error:
+            logger.info("%s order history skipped: %s", symbol, error)
+            return None
+
+    def _stored_card(self, symbol):
+        normalized = str(symbol).strip().upper()
+        for card in self.database.list_symbol_scans():
+            if str(card.get("symbol") or "").strip().upper() == normalized:
+                return card
+        return None
+
+    def _signal_from_stored_card(self, symbol, direction):
+        """The scan card the user confirmed. Prices are the scan's, not new ones."""
+        card = self._stored_card(symbol)
+        if card is None:
+            raise ValueError(
+                f"{symbol} has no stored scan, so the paper order was not sent."
+            )
+        decision = str(card.get("decision") or "").upper()
+        if decision != direction:
+            if direction == "BUY":
+                reason = str(card.get("reason") or "").strip()
+                extra = f" {reason}" if reason else ""
+                raise ValueError(
+                    f"{symbol} is not a current BUY. A wait is not a buy.{extra}"
+                )
+            raise ValueError(
+                f"{symbol} is not a current SELL. A wait is not a short."
+            )
+        entry, stop, target = card.get("entry"), card.get("stop"), card.get("target")
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (entry, stop, target)
+        ):
+            raise ValueError(
+                f"{symbol} has no entry, stop, and target from the scan, "
+                "so the paper order was not sent."
+            )
+        stamp = card.get("market_timestamp")
+        if not isinstance(stamp, str) or not stamp.strip():
+            raise PermissionError(
+                f"{symbol} has no source-market timestamp, so the paper order was not sent."
+            )
+        return {
+            "instrument": symbol,
+            "direction": direction,
+            "entry_price": float(entry),
+            "stop_loss": float(stop),
+            "profit_target": float(target),
+            "market_timestamp": stamp.strip(),
+            "explanation": str(card.get("reason") or ""),
+        }
+
+    def _quote_for_exit(self, symbol):
+        """A real price already in hand. A scan does not have to finish first."""
+        histories = self._histories_for_order(symbol)
+        if histories:
+            quote = _latest_quote(histories)
+            if quote is not None:
+                return quote
+        if self.histories_by_symbol is not None:
+            return None
+        card = self._stored_card(symbol)
+        price = None if card is None else card.get("price")
+        stamp = None if card is None else card.get("market_timestamp")
+        if (
+            isinstance(price, (int, float))
+            and not isinstance(price, bool)
+            and price > 0
+            and isinstance(stamp, str)
+            and stamp.strip()
+        ):
+            return stamp.strip(), float(price)
+        return None
+
+    def _fill_approved_signal(
+        self,
+        signal,
+        broker,
+        order_id,
+        symbol,
+        clicked_at,
+        filled_action,
+        rejected_action,
+        require_effect=None,
+        audit_extra=None,
+    ):
+        limits = RiskLimits()
+        entry = signal.get("entry_price")
+        stop = signal.get("stop_loss")
+        try:
+            sized = calculate_position_size(
+                broker.account_info()["equity"],
+                entry,
+                stop,
+                limits,
+                current_exposure=broker.current_exposure(),
+            )
+        except (TypeError, ValueError):
+            sized = 0
+        if not isinstance(sized, int) or sized <= 0:
+            reason = _shares_blocked_reason(
+                broker.account_info()["equity"],
+                entry,
+                stop,
+                broker.current_exposure(),
+            )
+            self._audit(rejected_action, symbol, {"reason": reason})
+            raise PermissionError(reason)
+        try:
+            order = execute_paper_signal(
+                signal,
+                broker,
+                order_id,
+                approved=True,
+                limits=limits,
+                max_data_age_seconds=self.settings.max_market_data_age_seconds,
+                approval_database=self.database,
+            )
+        except PermissionError as error:
+            self._audit(rejected_action, symbol, {"reason": str(error)})
+            raise
+        if require_effect is not None and order.get("effect") != require_effect:
+            self._audit(rejected_action, symbol, {"reason": order.get("effect")})
+            if require_effect == "OPEN_SHORT":
+                raise ValueError(f"{symbol} sell did not open a short.")
+            raise ValueError(f"{symbol} order did not {require_effect}.")
+        detail = {
+            "clicked_at": clicked_at,
+            "order_id": order["order_id"],
+            "quantity": order["quantity"],
+            "effect": order.get("effect"),
+        }
+        if audit_extra:
+            detail.update(audit_extra)
+        self._audit(filled_action, symbol, detail)
+        return {"ok": True, "order": _public_order(order)}
+
     def _audit(self, action, symbol, detail):
         detail = dict(detail or {})
         detail.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
@@ -1044,10 +1195,12 @@ class PaperDashboard:
             raise ValueError(
                 f"{normalized} has no open paper short. Buy to cover does not open a long."
             )
-        histories = self._histories(normalized)
+        histories = self._histories_for_order(normalized)
         if not histories:
-            self._audit("DASHBOARD_BUY_REJECTED", normalized, {"reason": "no bars"})
-            raise ValueError(f"{normalized} has no market bars.")
+            if self.histories_by_symbol is not None:
+                self._audit("DASHBOARD_BUY_REJECTED", normalized, {"reason": "no bars"})
+                raise ValueError(f"{normalized} has no market bars.")
+            return self._buy_from_stored_card(normalized, broker, clicked_at)
         preview = self._preview(normalized, broker, histories)
         recommendation = preview.get("recommendation")
         if preview.get("decision") != "BUY" or not recommendation:
@@ -1061,8 +1214,14 @@ class PaperDashboard:
             current_exposure=broker.current_exposure(),
         )
         if sized <= 0:
-            self._audit("DASHBOARD_BUY_REJECTED", normalized, {"reason": "risk size 0"})
-            raise PermissionError("Risk limits permit no shares.")
+            reason = _shares_blocked_reason(
+                broker.account_info()["equity"],
+                recommendation["entry_price"],
+                recommendation["stop_loss"],
+                broker.current_exposure(),
+            )
+            self._audit("DASHBOARD_BUY_REJECTED", normalized, {"reason": reason})
+            raise PermissionError(reason)
         try:
             order = execute_paper_signal(
                 recommendation,
@@ -1084,8 +1243,7 @@ class PaperDashboard:
         return {"ok": True, "order": _public_order(order)}
 
     def _cover_short(self, symbol, broker, clicked_at, alert_id=None):
-        histories = self._histories(symbol)
-        quote = _latest_quote(histories)
+        quote = self._quote_for_exit(symbol)
         if quote is None:
             self._audit("DASHBOARD_COVER_REJECTED", symbol, {"reason": "no price"})
             raise ValueError(f"{symbol} has no fresh price.")
@@ -1160,8 +1318,14 @@ class PaperDashboard:
             sized = 0
         if sized <= 0:
             audit["quantity"] = 0
+            reason = _shares_blocked_reason(
+                broker.account_info()["equity"],
+                signal["entry_price"],
+                signal["stop_loss"],
+                broker.current_exposure(),
+            )
             self._audit("PREDICTION_GATE_BLOCKED", symbol, audit)
-            raise PermissionError("Risk limits permit no shares.")
+            raise PermissionError(reason)
         try:
             order = execute_paper_signal(
                 signal,
@@ -1204,10 +1368,12 @@ class PaperDashboard:
             raise ValueError(
                 f"{normalized} has no open paper long. Sell on Today's trades does not open a short."
             )
-        histories = self._histories(normalized)
+        histories = self._histories_for_order(normalized)
         if not histories:
-            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": "no bars"})
-            raise ValueError(f"{normalized} has no market bars.")
+            if self.histories_by_symbol is not None:
+                self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": "no bars"})
+                raise ValueError(f"{normalized} has no market bars.")
+            return self._short_from_stored_card(normalized, broker, clicked_at)
         preview = self._preview(normalized, broker, histories)
         recommendation = preview.get("recommendation")
         if preview.get("decision") != "SELL" or not recommendation:
@@ -1226,8 +1392,14 @@ class PaperDashboard:
             current_exposure=broker.current_exposure(),
         )
         if sized <= 0:
-            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": "risk size 0"})
-            raise PermissionError("Risk limits permit no shares.")
+            reason = _shares_blocked_reason(
+                broker.account_info()["equity"],
+                recommendation["entry_price"],
+                recommendation["stop_loss"],
+                broker.current_exposure(),
+            )
+            self._audit("DASHBOARD_SHORT_REJECTED", normalized, {"reason": reason})
+            raise PermissionError(reason)
         try:
             order = execute_paper_signal(
                 recommendation,
@@ -1257,9 +1429,42 @@ class PaperDashboard:
         )
         return {"ok": True, "order": _public_order(order)}
 
+    def _buy_from_stored_card(self, symbol, broker, clicked_at):
+        try:
+            signal = self._signal_from_stored_card(symbol, "BUY")
+        except (PermissionError, ValueError) as error:
+            self._audit("DASHBOARD_BUY_REJECTED", symbol, {"reason": str(error)})
+            raise
+        return self._fill_approved_signal(
+            signal,
+            broker,
+            f"dash-buy-{symbol}-{uuid.uuid4().hex[:12]}",
+            symbol,
+            clicked_at,
+            "DASHBOARD_BUY_FILLED",
+            "DASHBOARD_BUY_REJECTED",
+        )
+
+    def _short_from_stored_card(self, symbol, broker, clicked_at):
+        try:
+            signal = self._signal_from_stored_card(symbol, "SELL")
+        except (PermissionError, ValueError) as error:
+            self._audit("DASHBOARD_SHORT_REJECTED", symbol, {"reason": str(error)})
+            raise
+        return self._fill_approved_signal(
+            signal,
+            broker,
+            f"dash-short-{symbol}-{uuid.uuid4().hex[:12]}",
+            symbol,
+            clicked_at,
+            "DASHBOARD_SHORT_FILLED",
+            "DASHBOARD_SHORT_REJECTED",
+            require_effect="OPEN_SHORT",
+            audit_extra={"position": "SHORT"},
+        )
+
     def _close_long(self, symbol, broker, clicked_at, alert_id=None):
-        histories = self._histories(symbol)
-        quote = _latest_quote(histories)
+        quote = self._quote_for_exit(symbol)
         if quote is None:
             raise ValueError(f"{symbol} has no fresh price.")
         market_timestamp, price = quote
@@ -1603,6 +1808,7 @@ def _scan_card(symbol, preview, broker):
         "shortable": decision == "SELL" and tradable and held_side != "LONG",
         "agreement": analysis.get("agreement"),
         "scanned_at": preview.get("scanned_at"),
+        "market_timestamp": (recommendation or {}).get("market_timestamp"),
         "timeframes": timeframes,
         "news": {
             "status": news.get("status"),
@@ -1707,6 +1913,32 @@ def _finite_number(value):
     if not math.isfinite(number):
         return None
     return number
+
+
+def _shares_blocked_reason(equity, entry, stop, exposure):
+    """Name the limit that left the risk size at zero. No size is invented."""
+    limits = RiskLimits()
+    try:
+        entry = float(entry)
+        stop = float(stop)
+        equity = float(equity)
+        exposure = float(exposure)
+    except (TypeError, ValueError):
+        return "Risk limits permit no shares."
+    risk_per_unit = abs(entry - stop)
+    if equity <= 0 or entry <= 0 or risk_per_unit == 0:
+        return "Risk limits permit no shares."
+    risk_units = math.floor(equity * limits.risk_per_trade_fraction / risk_per_unit)
+    remaining = max(0.0, equity * limits.max_position_fraction - exposure)
+    exposure_units = math.floor(remaining / entry)
+    if exposure_units <= 0:
+        return "Risk limits permit no shares. Open exposure is already at the 10% cap."
+    if risk_units <= 0:
+        return (
+            "Risk limits permit no shares. "
+            "The 1% per-trade limit is smaller than the stop distance."
+        )
+    return "Risk limits permit no shares."
 
 
 def _risk_usage(account, daily_pnl, exposure, halted, limits=None):
@@ -1926,6 +2158,18 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         except PermissionError as error:
             self._send(403, {"ok": False, "error": str(error)})
         except ValueError as error:
+            self._send(400, {"ok": False, "error": str(error)})
+        except sqlite3.OperationalError as error:
+            logger.info("Dashboard order failed: %s", error)
+            if "locked" in str(error).lower():
+                self._send(503, {
+                    "ok": False,
+                    "error": (
+                        "The paper ledger is in use by the loop. "
+                        "The order was not filled."
+                    ),
+                })
+                return
             self._send(400, {"ok": False, "error": str(error)})
         except Exception as error:
             logger.info("Dashboard order failed: %s", error)

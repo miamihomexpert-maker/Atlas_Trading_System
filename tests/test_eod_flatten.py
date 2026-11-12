@@ -531,7 +531,7 @@ def test_empty_day_is_honest():
 
 def test_today_trades_sell_and_cover_still_require_confirm_and_do_not_flip(tmp_path, monkeypatch):
     page = Path("atlas/dashboard_page.html").read_text(encoding="utf-8")
-    assert 'name="atlas-dashboard-version" content="28"' in page
+    assert 'name="atlas-dashboard-version" content="29"' in page
     assert 'data-tab="trades"' in page
     assert 'data-panel="trades"' in page
     assert "No paper positions or same-day trades." in page

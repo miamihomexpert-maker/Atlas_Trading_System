@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="atlas-dashboard-version" content="28">
+<meta name="atlas-dashboard-version" content="29">
 <title>ATLAS Trading System</title>
 <style>
   :root {
@@ -222,6 +222,9 @@
     letter-spacing: 0.04em;
   }
   .alert { border: 1px solid var(--amber); padding: 8px; margin-bottom: 8px; }
+  #order-note { border: 1px solid var(--amber); color: var(--amber); padding: 8px; margin-top: 8px; }
+  #order-note:empty { display: none; }
+  #order-note.ok { border-color: var(--up); color: var(--up); }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   td { padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(122, 215, 255, 0.12); vertical-align: top; }
   .subpanel { padding: 4px 0 12px; }
@@ -337,6 +340,7 @@
       <div class="label">NEXT STEP</div>
       <p class="muted">Select a symbol, then buy or sell.</p>
     </div>
+    <p id="order-note" role="status"></p>
   </section>
 </div>
 <div class="modal" id="modal">
@@ -386,9 +390,22 @@ async function post(path, body) {
     headers: { "Content-Type": "application/json", "X-Atlas-Token": TOKEN },
     body: JSON.stringify(body)
   });
-  const payload = await response.json();
-  if (!response.ok || payload.ok === false) throw new Error(payload.error || "Order rejected");
+  let payload = {};
+  try { payload = await response.json(); }
+  catch (error) { payload = {}; }
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error || "Order rejected");
+  }
   return payload;
+}
+
+function setOrderNote(message, tone) {
+  state.orderNote = message || "";
+  state.orderTone = tone || "";
+  const host = document.getElementById("order-note");
+  if (!host) return;
+  host.textContent = state.orderNote;
+  host.classList.toggle("ok", state.orderTone === "ok" && !!state.orderNote);
 }
 
 function finite(value) {
@@ -1351,8 +1368,16 @@ async function askBuy(symbol, coverOnly) {
       : `Submit a paper buy for ${symbol}? The server re-checks the signal, risk limits, and the daily-loss halt. Live trading stays off.`
   );
   if (!ok) return;
-  try { await post("/api/buy", coverOnly ? { symbol, cover_only: true } : { symbol }); await refresh(); }
-  catch (error) { document.getElementById("candidate-note").textContent = error.message; }
+  setOrderNote("Submitting the paper order…");
+  try {
+    await post("/api/buy", coverOnly ? { symbol, cover_only: true } : { symbol });
+  } catch (error) {
+    setOrderNote(error.message || "Paper order was rejected.");
+    return;
+  }
+  setOrderNote("Paper order filled.", "ok");
+  try { await refresh(); }
+  catch (error) { setOrderNote("Paper order filled. The book did not refresh: " + error.message); }
 }
 async function askSell(symbol, closeOnly) {
   const closing = !!closeOnly || heldSide(symbol) === "LONG";
@@ -1363,14 +1388,30 @@ async function askSell(symbol, closeOnly) {
       : `Submit a paper short for ${symbol}? The server re-checks that the scan is a real sell and that the risk size is above zero. A wait is not a short. Live trading stays off.`
   );
   if (!ok) return;
-  try { await post("/api/sell", closeOnly ? { symbol, close_only: true } : { symbol }); await refresh(); }
-  catch (error) { document.getElementById("candidate-note").textContent = error.message; }
+  setOrderNote("Submitting the paper order…");
+  try {
+    await post("/api/sell", closeOnly ? { symbol, close_only: true } : { symbol });
+  } catch (error) {
+    setOrderNote(error.message || "Paper order was rejected.");
+    return;
+  }
+  setOrderNote("Paper order filled.", "ok");
+  try { await refresh(); }
+  catch (error) { setOrderNote("Paper order filled. The book did not refresh: " + error.message); }
 }
 async function askAlert(alertId, symbol) {
   const ok = await confirmTrade("CONFIRM RECOMMENDED SELL", `OK the recommended paper sell for ${symbol}? This click is the approval.`);
   if (!ok) return;
-  try { await post("/api/alerts/accept", { alert_id: Number(alertId) }); await refresh(); }
-  catch (error) { document.getElementById("candidate-note").textContent = error.message; }
+  setOrderNote("Submitting the paper order…");
+  try {
+    await post("/api/alerts/accept", { alert_id: Number(alertId) });
+  } catch (error) {
+    setOrderNote(error.message || "Paper order was rejected.");
+    return;
+  }
+  setOrderNote("Paper order filled.", "ok");
+  try { await refresh(); }
+  catch (error) { setOrderNote("Paper order filled. The book did not refresh: " + error.message); }
 }
 
 function refreshDetail() { renderDetail(); renderWatchlist(); renderActions(); }
@@ -1412,6 +1453,7 @@ async function refresh(forceScan) {
     clearTimeout(state.scanFollowUp);
     state.scanFollowUp = 0;
   }
+  if (state.orderNote) setOrderNote(state.orderNote, state.orderTone);
 }
 
 function scheduleScanFollowUp() {
