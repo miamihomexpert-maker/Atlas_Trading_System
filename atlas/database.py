@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from math import isfinite
 import json
@@ -5,6 +6,13 @@ from pathlib import Path
 import secrets
 import sqlite3
 import threading
+import time
+
+
+# The paper loop and the dashboard are separate processes on one SQLite file.
+# Five seconds was short enough for a fill to be dropped while the loop still
+# held the file. Wait, then retry, so a confirmed order is not thrown away.
+BUSY_TIMEOUT_SECONDS = 30
 
 
 def _fill_closes(row):
@@ -27,14 +35,19 @@ class AtlasDatabase:
         self._connection = sqlite3.connect(
             self.path,
             check_same_thread=False,
+            timeout=BUSY_TIMEOUT_SECONDS,
         )
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute(
+            f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_SECONDS * 1000)}"
+        )
         if self.path != ":memory:":
             self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.commit()
         self._initialize()
 
     def _initialize(self):
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS paper_orders (
@@ -158,12 +171,49 @@ class AtlasDatabase:
                     "ALTER TABLE position_plans ADD COLUMN side TEXT NOT NULL DEFAULT 'LONG'"
                 )
 
+    @contextmanager
+    def _write_transaction(self):
+        """Take the write lock, wait out the other process, then commit.
+
+        The wait happens before the transaction is open, and the in-process
+        lock is released between attempts so a page read is not stuck behind
+        the loop. BEGIN IMMEDIATE waits at the start. A deferred write can
+        fail instantly once this connection already has a read transaction.
+        """
+        deadline = time.monotonic() + BUSY_TIMEOUT_SECONDS
+        self._lock.acquire()
+        try:
+            while True:
+                try:
+                    if self._connection.in_transaction:
+                        self._connection.rollback()
+                    self._connection.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError as error:
+                    locked = "locked" in str(error).lower()
+                    if not locked or time.monotonic() >= deadline:
+                        raise
+                    self._lock.release()
+                    try:
+                        time.sleep(0.05)
+                    finally:
+                        self._lock.acquire()
+            try:
+                yield
+            except BaseException:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+        finally:
+            self._lock.release()
+
     def close(self):
         with self._lock:
             self._connection.close()
 
     def record_initial_account(self, account):
-        with self._lock, self._connection:
+        with self._write_transaction():
             if self._connection.execute(
                 "SELECT 1 FROM equity_snapshots LIMIT 1"
             ).fetchone():
@@ -181,7 +231,7 @@ class AtlasDatabase:
             )
 
     def record_account_snapshot(self, account):
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO equity_snapshots(timestamp, equity, realized_pnl)
@@ -208,7 +258,7 @@ class AtlasDatabase:
         stored_reason = reason if reason is not None else order.get("reason")
         if stored_reason is not None:
             stored_reason = str(stored_reason).strip() or None
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO paper_orders(
@@ -270,7 +320,7 @@ class AtlasDatabase:
 
     def record_audit_event(self, action, symbol, detail):
         timestamp = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO audit_events(timestamp, action, symbol, detail_json)
@@ -302,7 +352,7 @@ class AtlasDatabase:
         reason = str(reason).strip().lower()
         now = datetime.now(timezone.utc).isoformat()
         payload = json.dumps(detail or {}, sort_keys=True, default=str)
-        with self._lock, self._connection:
+        with self._write_transaction():
             existing = self._connection.execute(
                 """
                 SELECT id FROM exit_alerts
@@ -364,14 +414,14 @@ class AtlasDatabase:
         return item
 
     def set_exit_alert_status(self, alert_id, status):
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 "UPDATE exit_alerts SET status = ? WHERE id = ?",
                 (str(status), int(alert_id)),
             )
 
     def supersede_exit_alerts(self, symbol, reason):
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 UPDATE exit_alerts SET status = 'SUPERSEDED'
@@ -532,7 +582,7 @@ class AtlasDatabase:
 
     def save_model_candidate(self, version, metrics, model):
         created_at = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO model_versions(
@@ -618,7 +668,7 @@ class AtlasDatabase:
                 "active_version": incumbent["version"] if incumbent else None,
             }
 
-        with self._lock, self._connection:
+        with self._write_transaction():
             if incumbent is not None:
                 self._connection.execute(
                     "UPDATE model_versions SET status = 'archived' WHERE version = ?",
@@ -649,7 +699,7 @@ class AtlasDatabase:
         incumbent = self.active_model()
         if incumbent is not None and incumbent["version"] == version:
             return version
-        with self._lock, self._connection:
+        with self._write_transaction():
             if incumbent is not None:
                 self._connection.execute(
                     "UPDATE model_versions SET status = 'archived' WHERE version = ?",
@@ -684,7 +734,7 @@ class AtlasDatabase:
 
         now = datetime.now(timezone.utc)
         token = secrets.token_urlsafe(24)
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO trade_approvals(
@@ -702,7 +752,7 @@ class AtlasDatabase:
         return token
 
     def cancel_trade_approval(self, token):
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 UPDATE trade_approvals SET status = 'CANCELLED', response_at = ?
@@ -732,7 +782,7 @@ class AtlasDatabase:
         if decision not in {"APPROVE", "REJECT"}:
             raise ValueError("Approval decision must be APPROVE or REJECT.")
         now = datetime.now(timezone.utc)
-        with self._lock, self._connection:
+        with self._write_transaction():
             row = self._connection.execute(
                 "SELECT * FROM trade_approvals WHERE token = ?",
                 (token,),
@@ -764,7 +814,7 @@ class AtlasDatabase:
         return {"status": status, "signal": signal}
 
     def claim_trade_approval(self, token, chat_id, order_id, signal):
-        with self._lock, self._connection:
+        with self._write_transaction():
             row = self._connection.execute(
                 "SELECT * FROM trade_approvals WHERE token = ?",
                 (token,),
@@ -804,7 +854,7 @@ class AtlasDatabase:
             return {"status": row["status"]}
 
     def complete_trade_approval(self, token, order_id):
-        with self._lock, self._connection:
+        with self._write_transaction():
             updated = self._connection.execute(
                 """
                 UPDATE trade_approvals SET status = 'EXECUTED',
@@ -819,7 +869,7 @@ class AtlasDatabase:
     def upsert_symbol_scan(self, symbol, card):
         symbol = str(symbol).strip().upper()
         scanned_at = str(card.get("scanned_at") or datetime.now(timezone.utc).isoformat())
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO symbol_scans(symbol, scanned_at, decision, buyable, card_json)
@@ -875,7 +925,7 @@ class AtlasDatabase:
         ):
             return latest["id"]
         recorded_at = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._connection:
+        with self._write_transaction():
             cursor = self._connection.execute(
                 """
                 INSERT INTO scan_observations(
@@ -938,7 +988,7 @@ class AtlasDatabase:
             raise ValueError("A learning event needs a symbol, source, and source key.")
         stamp = learned_at or datetime.now(timezone.utc).isoformat()
         payload = json.dumps(detail or {}, sort_keys=True, default=str)
-        with self._lock, self._connection:
+        with self._write_transaction():
             cursor = self._connection.execute(
                 """
                 INSERT OR IGNORE INTO learning_events(
@@ -993,7 +1043,7 @@ class AtlasDatabase:
         return row["value"] if row else default
 
     def set_metadata(self, key, value):
-        with self._lock, self._connection:
+        with self._write_transaction():
             self._connection.execute(
                 """
                 INSERT INTO atlas_metadata(key, value)

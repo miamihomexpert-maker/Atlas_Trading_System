@@ -81,6 +81,7 @@ def card_from_pipeline(result, equity, exposure):
         "shortable": decision == "SELL" and isinstance(quantity, int) and quantity > 0,
         "agreement": analysis.get("agreement"),
         "scanned_at": result.get("scanned_at"),
+        "market_timestamp": recommendation.get("market_timestamp"),
         "timeframes": {},
         "news": {
             "status": news.get("status"),
