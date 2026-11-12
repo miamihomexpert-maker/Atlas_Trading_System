@@ -7,6 +7,7 @@ import time
 from atlas.dashboard import PaperDashboard, _state_payload
 from atlas.database import AtlasDatabase
 from atlas.market_data import (
+    call_yahoo,
     clear_feed_pause,
     feed_is_paused,
     get_stock_history,
@@ -278,6 +279,113 @@ def test_history_timeout_fails_fast_and_pauses(monkeypatch):
         assert time.perf_counter() - started < 0.5
     finally:
         clear_feed_pause()
+
+
+def test_chart_returns_bars_while_a_scan_holds_the_market_data_lock(tmp_path, monkeypatch):
+    """The selected symbol's chart reads bars on its own path.
+
+    A batch scan holds the shared Yahoo lock for the whole pass. That lock
+    must not turn the 1m or 1h chart into an empty "already running" note.
+    """
+    monkeypatch.delenv("ATLAS_TIMEFRAMES", raising=False)
+    clear_feed_pause()
+    frame = recent_history(100, 1)
+    service, database = _live_service(tmp_path)
+    held = threading.Event()
+    release = threading.Event()
+
+    def scan_action():
+        held.set()
+        release.wait(5)
+        return "scan"
+
+    def run_scan():
+        call_yahoo(scan_action, timeout=5)
+
+    class Ticker:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, period, interval):
+            return frame
+
+    monkeypatch.setattr("atlas.market_data.yf.Ticker", Ticker)
+    scan = threading.Thread(target=run_scan)
+    scan.start()
+    try:
+        assert held.wait(2)
+        blocked, error = call_yahoo(lambda: "shared")
+        assert blocked is None
+        assert "already running" in str(error).lower()
+        for timeframe in ("1m", "1h"):
+            payload = service.candles("XYZ", timeframe)
+            assert payload["error"] is None
+            assert payload["candles"]
+            assert payload["candles"][-1]["close"] == frame["Close"].iloc[-1]
+        still_blocked, still_error = call_yahoo(lambda: "shared")
+        assert still_blocked is None
+        assert "already running" in str(still_error).lower()
+    finally:
+        release.set()
+        scan.join(3)
+        clear_feed_pause()
+        database.close()
+
+
+def test_cached_chart_bars_are_served_while_a_fetch_is_in_flight(tmp_path, monkeypatch):
+    """A second chart read for the same symbol and timeframe does not go empty.
+
+    One fetch for that pair runs at a time. Until it finishes, the chart
+    shows the last bars and says how old they are.
+    """
+    monkeypatch.delenv("ATLAS_TIMEFRAMES", raising=False)
+    clear_feed_pause()
+    frame = recent_history(100, 1)
+    service, database = _live_service(tmp_path)
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    class Ticker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, period, interval):
+            calls.append((self.symbol, interval))
+            if len(calls) == 1:
+                return frame
+            started.set()
+            release.wait(5)
+            return frame
+
+    monkeypatch.setattr("atlas.market_data.yf.Ticker", Ticker)
+    holder = None
+    try:
+        first = service.candles("XYZ", "1m")
+        assert first["error"] is None
+        assert first["candles"]
+        assert first["candles"][-1]["close"] == frame["Close"].iloc[-1]
+        holder = threading.Thread(target=lambda: service.candles("XYZ", "1m"), daemon=True)
+        holder.start()
+        assert started.wait(2)
+        started_at = time.perf_counter()
+        cached = service.candles("XYZ", "1m")
+        assert time.perf_counter() - started_at < 0.5
+        assert holder.is_alive()
+        assert len(calls) == 2
+        assert cached["candles"][-1]["close"] == first["candles"][-1]["close"]
+        assert len(cached["candles"]) == len(first["candles"])
+        assert cached["error"].startswith("Showing bars")
+        assert "ago" in cached["error"] or "just now" in cached["error"]
+        assert cached["bars_age_seconds"] >= 0
+        assert "no bars were returned" not in cached["error"].lower()
+        assert "already running" not in cached["error"].lower()
+    finally:
+        release.set()
+        if holder is not None:
+            holder.join(3)
+        clear_feed_pause()
+        database.close()
 
 
 def test_paused_news_fetch_does_not_call_yahoo():

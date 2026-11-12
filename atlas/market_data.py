@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import logging
 import threading
@@ -21,7 +22,11 @@ _RATE_LIMIT_MARKERS = (
     "rate limit",
     "yfratelimiterror",
 )
+# Scan, news, and company reads share one Yahoo call. Chart bars do not.
 _fetch_lock = threading.Lock()
+_chart_locks_guard = threading.Lock()
+_chart_locks = {}
+_lane_local = threading.local()
 _pause_lock = threading.Lock()
 _skip_local = threading.local()
 _paused_until = None
@@ -146,18 +151,58 @@ def pause_note(now=None):
     return None if status is None else status["note"]
 
 
+@contextmanager
+def chart_fetch_scope():
+    """Fetch chart bars without taking the scan's market-data lock.
+
+    The Yahoo pause still applies. One chart fetch per symbol and interval
+    runs at a time; a second one is skipped so the caller can show cached bars.
+    """
+    previous = getattr(_lane_local, "name", None)
+    _lane_local.name = "chart"
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                del _lane_local.name
+            except AttributeError:
+                pass
+        else:
+            _lane_local.name = previous
+
+
+def _yahoo_lane():
+    return getattr(_lane_local, "name", "shared")
+
+
+def _chart_symbol_lock(symbol, interval):
+    key = (str(symbol).strip().upper(), str(interval).strip())
+    with _chart_locks_guard:
+        lock = _chart_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _chart_locks[key] = lock
+        return lock
+
+
 def call_yahoo(action, timeout=None):
     """Run one Yahoo call off the request if it is already known to be blocked.
 
-    Returns ``(value, error)``. A pause, a busy feed, a timeout, or a rate
-    limit yields no value. The action's own data is returned unchanged.
+    Returns ``(value, error)``. A pause, a busy shared feed, a timeout, or a
+    rate limit yields no value. The action's own data is returned unchanged.
+    Chart-lane calls do not take the scan lock.
     """
     if feed_is_paused():
         _mark_skip("paused")
         return None, RuntimeError(pause_note() or "Yahoo requests are paused.")
-    if not _fetch_lock.acquire(blocking=False):
-        _mark_skip("busy")
-        return None, RuntimeError("A market-data request is already running.")
+    share_lock = _yahoo_lane() != "chart"
+    acquired = False
+    if share_lock:
+        acquired = _fetch_lock.acquire(blocking=False)
+        if not acquired:
+            _mark_skip("busy")
+            return None, RuntimeError("A market-data request is already running.")
     try:
         if feed_is_paused():
             _mark_skip("paused")
@@ -187,7 +232,8 @@ def call_yahoo(action, timeout=None):
         note_feed_success()
         return box.get("value"), None
     finally:
-        _fetch_lock.release()
+        if acquired:
+            _fetch_lock.release()
 
 
 _install_yahoo_rate_limit_log()
@@ -385,19 +431,33 @@ def _fetch_history(symbol, period, interval):
     normalized_symbol = str(symbol).strip().upper()
     if not normalized_symbol:
         raise ValueError("Instrument symbol is required.")
+    chart_lock = None
+    if _yahoo_lane() == "chart":
+        chart_lock = _chart_symbol_lock(normalized_symbol, interval)
+        if not chart_lock.acquire(blocking=False):
+            _mark_skip("chart_busy")
+            return None
+    try:
+        return _read_history(normalized_symbol, period, interval)
+    finally:
+        if chart_lock is not None:
+            chart_lock.release()
+
+
+def _read_history(symbol, period, interval):
     history, error = call_yahoo(
-        lambda: yf.Ticker(normalized_symbol).history(period=period, interval=interval)
+        lambda: yf.Ticker(symbol).history(period=period, interval=interval)
     )
     if error is not None:
         if not feed_is_paused():
-            logger.info("%s history fetch skipped: %s", normalized_symbol, error)
+            logger.info("%s history fetch skipped: %s", symbol, error)
         return None
     if history is None or getattr(history, "empty", True):
         if feed_is_paused():
             _mark_skip("rate_limit")
             logger.info(
                 "%s history fetch skipped: %s",
-                normalized_symbol,
+                symbol,
                 pause_note() or "Yahoo returned no bars while rate limited.",
             )
         else:
@@ -406,7 +466,7 @@ def _fetch_history(symbol, period, interval):
     try:
         normalized = normalize_ohlcv(history)
     except (TypeError, ValueError) as error:
-        logger.info("%s history dropped: %s", normalized_symbol, error)
+        logger.info("%s history dropped: %s", symbol, error)
         _mark_skip("error")
         return None
     return normalized

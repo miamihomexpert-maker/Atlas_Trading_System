@@ -15,6 +15,7 @@ from atlas.database import AtlasDatabase
 from atlas.execution import execute_paper_signal
 from atlas.logger import get_logger
 from atlas.market_data import (
+    chart_fetch_scope,
     feed_is_paused,
     feed_status,
     note_feed_failure,
@@ -104,9 +105,34 @@ def _candle_skip_message(skips=()):
         return "Yahoo history timed out. No bars were returned."
     if note or "rate_limit" in skips or "paused" in skips:
         return "Yahoo rate limited. No bars were returned."
+    if "chart_busy" in skips:
+        return "A chart fetch for this symbol is already running. No bars were returned."
     if "busy" in skips:
         return "A market-data request is already running. No bars were returned."
     return "No bars were returned."
+
+
+def _bars_age_seconds(fetched_at, now=None):
+    if not fetched_at:
+        return None
+    try:
+        when = datetime.fromisoformat(str(fetched_at))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0, int((now - when).total_seconds()))
+
+
+def _bars_age_note(seconds):
+    if seconds is None:
+        return "Showing the last bars returned."
+    if seconds <= 0:
+        return "Showing bars fetched just now."
+    if seconds == 1:
+        return "Showing bars from 1 second ago."
+    return f"Showing bars from {seconds} seconds ago."
 
 
 class PaperDashboard:
@@ -746,7 +772,10 @@ class PaperDashboard:
     def _feed_blocked(self, skips):
         if feed_is_paused():
             return True
-        return any(reason in {"paused", "rate_limit", "timeout", "busy"} for reason in skips)
+        return any(
+            reason in {"paused", "rate_limit", "timeout", "busy", "chart_busy"}
+            for reason in skips
+        )
 
     def _scan_one_batch(self):
         universe = list(self.settings.instruments)
@@ -927,7 +956,8 @@ class PaperDashboard:
             if self.candle_loader is not None:
                 frame = self.candle_loader(normalized, requested)
             else:
-                histories = fetch_session_histories(normalized, (requested,))
+                with chart_fetch_scope():
+                    histories = fetch_session_histories(normalized, (requested,))
                 frame = histories.get(requested) if histories else None
         except Exception as error:
             note_feed_failure(error)
@@ -981,6 +1011,7 @@ class PaperDashboard:
                 "rsi": _finite_number(rsi.iloc[offset]),
             })
         payload = _chart_result(normalized, requested, candles, None, chart_only)
+        payload["fetched_at"] = datetime.now(timezone.utc).isoformat()
         self._candle_cache[(normalized, requested)] = payload
         return _annotate_feed(payload)
 
@@ -989,10 +1020,14 @@ class PaperDashboard:
         if cached and cached.get("candles"):
             payload = dict(cached)
             payload["candles"] = list(cached["candles"])
-            payload["error"] = error.replace(
-                "No bars were returned.",
-                "Showing the last bars returned.",
-            )
+            seconds = _bars_age_seconds(cached.get("fetched_at"))
+            note = _bars_age_note(seconds)
+            payload["bars_age_seconds"] = seconds
+            lowered = (error or "").lower()
+            if "rate limited" in lowered or "timed out" in lowered:
+                payload["error"] = (error or note).replace("No bars were returned.", note)
+            else:
+                payload["error"] = note
             return _annotate_feed(payload)
         return _annotate_feed(_chart_result(symbol, timeframe, [], error, chart_only))
 
